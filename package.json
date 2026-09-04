@@ -1,0 +1,19 @@
+{
+  "name": "voicefill",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "preflight": "node scripts/probe/run_all.mjs",
+    "selftest": "node tools/selftest.mjs",
+    "backend": "node backend/server.mjs",
+    "catalog": "node tools/inspect_catalog.mjs",
+    "auth": "node tools/diagnose_auth.mjs",
+    "probe": "node scripts/probe/one.mjs",
+    "doctor": "node tools/doctor.mjs",
+    "phase0": "node tools/phase0.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

@@ -1,0 +1,10 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>VoiceFill offscreen</title></head>
+  <body>
+    <!-- Not user-visible. Owns audio playback, the playback clock, and (from
+         Phase 1) the WebSocket to the backend proxy. -->
+    <audio id="player"></audio>
+    <script type="module" src="player.js"></script>
+  </body>
+</html>

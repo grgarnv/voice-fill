@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "VoiceFill",
+  "version": "0.1.0",
+  "description": "Spoken layer for any web form. Reads fields aloud, takes answers by voice, reads back what it entered.",
+  "minimum_chrome_version": "116",
+  "permissions": ["offscreen", "activeTab", "scripting", "storage"],
+  "host_permissions": ["http://localhost:8787/*", "ws://localhost:8787/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": { "default_popup": "popup/popup.html", "default_title": "VoiceFill" },
+  "web_accessible_resources": [
+    { "resources": ["assets/test.mp3"], "matches": ["<all_urls>"] }
+  ]
+}

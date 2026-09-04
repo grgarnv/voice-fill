@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VoiceFill</title>
+<style>
+  :root { --ink:#12161c; --line:#2a323d; --dim:#8a95a3; --ok:#3fbf7f; --bad:#e0574a; --wait:#c9a227; --fg:#eef2f6; }
+  * { box-sizing: border-box; }
+  body { width: 320px; margin:0; padding:14px 16px 16px; background: var(--ink); color: var(--fg);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); font-size: 12px; margin: 0 0 14px; }
+  .badge { border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin-bottom:14px;
+           font-size:12px; color:var(--dim); }
+  .badge strong { color: var(--fg); font-weight:600; }
+  .badge code { font-family: ui-monospace, Menlo, monospace; color:#a8c7e8; }
+  .check { display:flex; align-items:baseline; gap:9px; padding:6px 0; border-top:1px solid var(--line); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); flex:none; transform:translateY(-1px); }
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.wait{background:var(--wait)}
+  .name { flex:1; }
+  .val { color:var(--dim); font-size:12px; font-family: ui-monospace, Menlo, monospace; text-align:right; }
+  button { width:100%; margin-top:14px; padding:9px; border-radius:6px; border:1px solid var(--line);
+           background:#1c2430; color:var(--fg); font-size:14px; cursor:pointer; }
+  button:hover { background:#232d3b; }
+  button:focus-visible { outline:2px solid #6ea8fe; outline-offset:2px; }
+  @media (prefers-reduced-motion: no-preference) { .dot { transition: background .15s; } }
+</style>
+</head>
+<body>
+  <h1>VoiceFill</h1>
+  <p class="sub">Phase 0 preflight</p>
+
+  <!-- Required active-provider disclosure (PRD F1.5). Speaker is filled from
+       the value locked by preflight probe 00. -->
+  <div class="badge">Speaking via <strong>Rime</strong> · <code id="model">mistv2</code> · <code id="speaker">not set</code></div>
+
+  <div class="check"><span class="dot" id="d-content"></span><span class="name">Content script</span><span class="val" id="v-content">checking</span></div>
+  <div class="check"><span class="dot" id="d-bg"></span><span class="name">Service worker</span><span class="val" id="v-bg">checking</span></div>
+  <div class="check"><span class="dot" id="d-off"></span><span class="name">Offscreen document</span><span class="val" id="v-off">checking</span></div>
+  <div class="check"><span class="dot" id="d-audio"></span><span class="name">Audio playback</span><span class="val" id="v-audio">not run</span></div>
+  <div class="check"><span class="dot" id="d-csp"></span><span class="name">Page CSP</span><span class="val" id="v-csp">unknown</span></div>
+
+  <button id="play">Play test tone on this page</button>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
