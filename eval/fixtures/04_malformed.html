@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Malformed</title></head><body>
+<h1>Forms that violate the spec</h1>
+
+<!-- inputs with no <form> ancestor at all -->
+<label for="orphan">Orphan field with no form</label><input id="orphan" name="orphan">
+
+<!-- nested forms: illegal, and the parser will unnest them -->
+<form>
+  <label for="outer">Outer form field</label><input id="outer" name="outer">
+  <form>
+    <label for="inner">Inner form field</label><input id="inner" name="inner">
+  </form>
+</form>
+
+<!-- duplicate ids: label[for] is ambiguous by construction -->
+<label for="dupe">First duplicate</label><input id="dupe" name="d1">
+<label for="dupe">Second duplicate</label><input id="dupe" name="d2">
+
+<!-- unclosed tags -->
+<div><label for="unclosed">Unclosed div label</label><input id="unclosed" name="unclosed">
+
+<!-- a label wrapping MULTIPLE controls -->
+<label>Both of these
+  <input name="multi_a"><input name="multi_b">
+</label>
+
+<!-- contenteditable as a field -->
+<div>Notes</div>
+<div contenteditable="true" id="ce" aria-label="Additional notes"></div>
+
+<!-- role-based widgets with no native control -->
+<div role="combobox" aria-label="Delivery slot" tabindex="0" style="border:1px solid #999;padding:4px;width:200px">Choose a slot</div>
+<div role="radiogroup" aria-label="Contact preference" style="padding:4px">
+  <div role="radio" aria-checked="false" tabindex="0">By email</div>
+  <div role="radio" aria-checked="false" tabindex="-1">By phone</div>
+</div>
+
+<!-- tabindex deliberately reversing the visual order -->
+<label for="t3">Third visually, first by tabindex</label><input id="t3" name="t3" tabindex="1">
+<label for="t4">Fourth visually, second by tabindex</label><input id="t4" name="t4" tabindex="2">
+
+<!-- a disabled control -->
+<label for="dis">Disabled field</label><input id="dis" name="dis" disabled>
+</body></html>

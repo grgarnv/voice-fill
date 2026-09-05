@@ -1,0 +1,36 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Label torture</title></head><body>
+<h1>Every label-resolution rule, one field each</h1>
+<form>
+  <!-- 1. label[for] -->
+  <label for="f-for">Full name</label><input id="f-for" name="fullname">
+
+  <!-- 2. wrapping label. The control's own value must not leak into the name. -->
+  <label>Email address <input type="text" name="wrapped" value="SHOULD-NOT-APPEAR"></label>
+
+  <!-- 3. aria-label -->
+  <input aria-label="Mobile number" name="aria">
+
+  <!-- 4. aria-labelledby, two ids joined -->
+  <span id="lb1">Postal</span><span id="lb2">code</span>
+  <input aria-labelledby="lb1 lb2" name="alby">
+
+  <!-- 5. placeholder only -->
+  <input placeholder="Company name" name="ph">
+
+  <!-- 6. nearest preceding text node -->
+  <div>Reference number <input name="preceding"></div>
+
+  <!-- 7. nothing at all: falls back to a humanised name attribute -->
+  <input name="date_of_birth">
+
+  <!-- 8. genuinely anonymous: must not kill the flow -->
+  <input>
+
+  <!-- label[for] pointing at an id containing CSS-special characters. An
+       unescaped querySelector on this throws and would abort the whole scan. -->
+  <label for="user:profile.name">Display name</label><input id="user:profile.name" name="weirdid">
+
+  <!-- decoration that must be stripped from speech -->
+  <label for="f-req">Card holder name * (required):</label><input id="f-req" name="req" required>
+</form>
+</body></html>

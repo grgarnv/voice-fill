@@ -9,6 +9,18 @@ const pop = read('extension/popup/popup.js');
 const con = read('extension/content/content.js');
 const errs = [], notes = [];
 
+/**
+ * Strip comments before checking for forbidden API use. Without this the check
+ * fires on the comment that documents the restriction, which is a check that
+ * can only be satisfied by deleting the explanation.
+ */
+const stripComments = (src) => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+const offCode = stripComments(off);
+const conCode = stripComments(con);
+
 const sent = s => [...s.matchAll(/type:\s*'([A-Z_]+)'/g)].map(m => m[1]);
 const handled = s => [...s.matchAll(/msg\??\.type === '([A-Z_]+)'|case '([A-Z_]+)'/g)].map(m => m[1] || m[2]);
 
@@ -29,6 +41,49 @@ if (!/target:\s*'offscreen'/.test(bg)) errs.push("background sends to offscreen 
 if (!/msg\?\.target !== 'offscreen'/.test(off)) errs.push('offscreen does not filter on target - it will answer messages meant for background');
 if (!/return true/.test(bg)) errs.push('background listener does not return true - async sendResponse will be dropped');
 if (!/return true/.test(off)) errs.push('offscreen listener does not return true - async sendResponse will be dropped');
+
+// ---- Phase 1 additions: the other three message directions ----------------
+//
+// The original file checked popup->background and background->offscreen only.
+// Phase 1 added background->content, content->background and offscreen->
+// background, and a typo in any of those fails exactly as silently: the
+// sendMessage promise simply never resolves.
+
+const sentToContent = [...bg.matchAll(/toContent\([^,]+,\s*\{\s*type:\s*'([A-Z_]+)'/g)].map(m => m[1]);
+for (const m of sentToContent) {
+  if (!conHandles.has(m)) errs.push(`background sends ${m} to the content script, which does not handle it`);
+}
+
+// The content script must answer these, and must return true to keep the
+// message channel open for its async reply.
+for (const required of ['VF_SCAN', 'VF_FOCUS_FIELD', 'VF_CLEAR_FOCUS']) {
+  if (!conHandles.has(required)) errs.push(`content script does not handle ${required}`);
+}
+if (!/return true/.test(conCode)) errs.push('content listener does not return true - async sendResponse will be dropped');
+
+// Offscreen and content both message the service worker; every type they send
+// must be handled there.
+for (const m of sent(off)) {
+  if (m.startsWith('VF_') && !bgHandles.has(m)) errs.push(`offscreen sends ${m}, background does not handle it`);
+}
+for (const m of sent(con)) {
+  if (m.startsWith('VF_') && !bgHandles.has(m)) errs.push(`content script sends ${m}, background does not handle it`);
+}
+
+// The offscreen document's API surface is limited to chrome.runtime. Reading
+// chrome.storage there throws "Cannot read properties of undefined", and the
+// session dies before the socket is ever opened.
+if (/chrome\.storage/.test(offCode)) {
+  errs.push('offscreen uses chrome.storage - not available in an offscreen document; pass config from background');
+}
+if (/chrome\.tabs/.test(offCode)) {
+  errs.push('offscreen uses chrome.tabs - not available in an offscreen document; route via background');
+}
+
+// Every utterance must carry a contextId, or the Phase 3 stale-drop has
+// nothing to filter on.
+if (!/contextId/.test(offCode)) errs.push('offscreen never sets a contextId - stale-chunk dropping cannot work');
+if (!/operation:\s*'flush'/.test(offCode)) errs.push("offscreen never flushes - under segment=never nothing is ever synthesised");
 
 // Offscreen lifecycle guards
 if (!/getContexts/.test(bg)) errs.push('no getContexts guard - createDocument throws if the document already exists');

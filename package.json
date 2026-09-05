@@ -11,7 +11,13 @@
     "auth": "node tools/diagnose_auth.mjs",
     "probe": "node scripts/probe/one.mjs",
     "doctor": "node tools/doctor.mjs",
-    "phase0": "node tools/phase0.mjs"
+    "phase0": "node tools/phase0.mjs",
+    "test:fieldgraph": "node tools/test_fieldgraph.mjs",
+    "test:forms": "node tools/test_real_forms.mjs",
+    "test:e2e": "node tools/test_e2e.mjs",
+    "test:exit": "node tools/test_phase1_exit.mjs",
+    "phase1": "node tools/phase1.mjs",
+    "browser": "npx @puppeteer/browsers install chrome@stable --path .cache/browsers"
   },
   "dependencies": {
     "ws": "^8.18.0"

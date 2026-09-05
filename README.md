@@ -4,8 +4,9 @@ A Chrome extension that adds a spoken layer to form-based websites that never
 built voice in. It reads each field aloud, takes the answer by voice, writes it
 into the DOM, and reads back what it entered before moving on.
 
-**Current state: Phase 0 (setup and preflight). Not yet functional.**
-See [PHASE0.md](./PHASE0.md) for what is verified and what is not.
+**Current state: Phase 1 complete — it reads a form aloud.** No microphone yet.
+See [PHASE0.md](./PHASE0.md) and [PHASE1.md](./PHASE1.md) for what is verified
+and what is not.
 
 ## Rime's role
 

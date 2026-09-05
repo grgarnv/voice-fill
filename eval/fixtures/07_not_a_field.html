@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Not a field</title></head><body>
+<h1>Controls that must never be asked as questions</h1>
+<form>
+  <label for="real">Delivery instructions</label><input id="real" name="real">
+
+  <!-- Cannot be answered: asking wastes the user's turn -->
+  <label for="dis">Disabled field</label><input id="dis" name="disabled_one" disabled>
+  <label for="ro">Readonly field</label><input id="ro" name="readonly_one" readonly value="fixed">
+  <label for="ad">Aria-disabled field</label><input id="ad" name="ariadisabled_one" aria-disabled="true">
+  <fieldset disabled>
+    <legend>Whole fieldset disabled</legend>
+    <label for="fsd">Inside a disabled fieldset</label><input id="fsd" name="in_disabled_fieldset">
+  </fieldset>
+
+  <!-- UI chrome wearing a checkbox costume: the Wikipedia navigation pattern -->
+  <input type="checkbox" id="menu" role="button" aria-haspopup="true" aria-label="Main menu"
+         style="position:absolute;opacity:0;width:44px;height:44px">
+  <input type="checkbox" id="pop" aria-haspopup="true" aria-label="Appearance settings"
+         style="width:20px;height:20px">
+  <div role="button" tabindex="0" aria-label="Open the picker" style="border:1px solid #999;width:120px">Pick</div>
+
+  <!-- A genuine styled custom checkbox: opacity 0 input + visible label. This
+       one IS a real field and must survive. -->
+  <label for="styled">Subscribe to updates</label>
+  <input type="checkbox" id="styled" name="styled_real" style="opacity:0;position:absolute;width:1px;height:1px">
+
+  <!-- Placeholders that are example VALUES, not labels -->
+  <input name="userEmail" placeholder="name@example.com">
+  <input name="home_phone" placeholder="(555) 555-5555">
+  <input name="start_date" placeholder="DD/MM/YYYY">
+  <input name="web_site" placeholder="https://example.com">
+  <input name="staff_id" placeholder="e.g. AB-12345">
+
+  <!-- Instruction-shaped labels -->
+  <label for="cp">Confirm password</label><input id="cp" name="cp" type="password">
+  <label for="re">Re-enter email address</label><input id="re" name="re" type="email">
+</form>
+</body></html>

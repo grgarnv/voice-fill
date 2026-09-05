@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><title>SPA dynamic</title></head><body>
+<h1>Fields that arrive late and re-render</h1>
+<div id="root">Loading…</div>
+<script>
+  // Nothing exists at loadEventFired - this is the React/Angular shape.
+  setTimeout(() => {
+    document.getElementById('root').innerHTML =
+      '<label for="a">Account holder</label><input id="a" name="account">' +
+      '<label for="b">Sort code</label><input id="b" name="sort">';
+  }, 400);
+
+  // A dependent field appears later, as if unlocked by an earlier answer.
+  setTimeout(() => {
+    const d = document.createElement('div');
+    d.innerHTML = '<label for="c">Building society roll number</label><input id="c" name="roll">';
+    document.getElementById('root').appendChild(d);
+  }, 900);
+
+  // A full remount: every element identity is replaced, ids and order kept.
+  // The session pointer must survive this, which is why it is held by stable
+  // key and not by index or element reference.
+  setTimeout(() => {
+    const r = document.getElementById('root');
+    r.innerHTML = r.innerHTML;   // forces new element objects
+    window.__remounted = true;
+  }, 1500);
+</script>
+</body></html>

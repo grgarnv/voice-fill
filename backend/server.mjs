@@ -22,6 +22,10 @@ const CFG = () => ({
   audioFormat: process.env.RIME_AUDIO_FORMAT || 'pcm',
   endpoint: process.env.RIME_WS_URL || 'wss://users-ws.rime.ai/ws3',
   transport: 'websocket-via-backend-proxy',
+  // Connection-level, and only effective as query params - see backend/rime.mjs.
+  segment: process.env.RIME_SEGMENT || 'never',
+  pauseBetweenBrackets: true,
+  samplingRate: (process.env.RIME_AUDIO_FORMAT || 'pcm') === 'pcm' ? 24000 : null,
 });
 
 const server = http.createServer((req, res) => {
@@ -52,6 +56,8 @@ wss.on('connection', (client, req) => {
     audioFormat: q.get('audioFormat') || c.audioFormat,
     lang: c.lang,
     samplingRate: (q.get('audioFormat') || c.audioFormat) === 'pcm' ? 24000 : undefined,
+    segment: q.get('segment') || c.segment,
+    pauseBetweenBrackets: true,
   });
 
   // Buffer client sends until upstream is open, so an early first utterance

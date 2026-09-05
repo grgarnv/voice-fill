@@ -1,0 +1,59 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Choices</title></head><body>
+<form>
+  <fieldset>
+    <legend>Preferred contact method</legend>
+    <label><input type="radio" name="contact" value="email"> Email</label>
+    <label><input type="radio" name="contact" value="phone"> Phone</label>
+    <label><input type="radio" name="contact" value="post"> Post</label>
+  </fieldset>
+
+  <!-- radios with NO fieldset: the group question has to come from somewhere -->
+  <div>
+    <span>Do you consent?</span>
+    <label><input type="radio" name="consent" value="y"> Yes</label>
+    <label><input type="radio" name="consent" value="n"> No</label>
+  </div>
+
+  <!-- a lone checkbox is a yes/no question, not a choice -->
+  <label><input type="checkbox" name="terms" required> I accept the terms and conditions</label>
+
+  <!-- same-name checkboxes are ONE multi-select question -->
+  <fieldset>
+    <legend>Dietary requirements</legend>
+    <label><input type="checkbox" name="diet" value="v"> Vegetarian</label>
+    <label><input type="checkbox" name="diet" value="ve"> Vegan</label>
+    <label><input type="checkbox" name="diet" value="gf"> Gluten free</label>
+  </fieldset>
+
+  <label for="sel">Country</label>
+  <select id="sel" name="country">
+    <option value="">Please choose…</option>
+    <optgroup label="Europe"><option value="gb">United Kingdom</option><option value="fr">France</option></optgroup>
+    <optgroup label="Asia"><option value="in">India</option><option value="jp">Japan</option></optgroup>
+  </select>
+
+  <!-- long list: must NOT be read out in full -->
+  <label for="big">Time zone</label>
+  <select id="big" name="tz"></select>
+  <script>
+    const s=document.getElementById('big');
+    for(let i=0;i<60;i++){const o=document.createElement('option');o.value='z'+i;o.textContent='Zone number '+i;s.appendChild(o);}
+  </script>
+
+  <!-- placeholder option with NO value attribute - the selenium.dev shape -->
+  <label for="novalue">Delivery slot</label>
+  <select id="novalue" name="slot">
+    <option selected>Open this select menu</option>
+    <option value="am">Morning</option><option value="pm">Afternoon</option>
+  </select>
+
+  <!-- a real first option that merely starts with "Select" must SURVIVE -->
+  <label for="realsel">Committee</label>
+  <select id="realsel" name="committee">
+    <option value="sc">Select Committee</option><option value="ac">Audit Committee</option>
+  </select>
+
+  <label for="multi">Languages you speak</label>
+  <select id="multi" name="langs" multiple><option>English</option><option>Hindi</option><option>French</option></select>
+</form>
+</body></html>

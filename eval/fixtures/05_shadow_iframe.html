@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Shadow + iframe</title></head><body>
+<h1>Shadow DOM and frames</h1>
+
+<label for="light">Light DOM field</label><input id="light" name="light">
+
+<div id="open-host"></div>
+<div id="closed-host"></div>
+<div id="nested-host"></div>
+
+<iframe id="same" srcdoc='<!doctype html><label for="if1">Field inside a same-origin iframe</label><input id="if1" name="iframe_field">' style="width:400px;height:80px"></iframe>
+
+<script>
+  // Open root: reachable, and must be scanned.
+  const o = document.getElementById('open-host').attachShadow({mode:'open'});
+  o.innerHTML = '<label for="s1">Field in an OPEN shadow root</label><input id="s1" name="shadow_open">';
+
+  // Closed root: unreachable by construction. Declared as a limitation.
+  const c = document.getElementById('closed-host').attachShadow({mode:'closed'});
+  c.innerHTML = '<label for="s2">Field in a CLOSED shadow root</label><input id="s2" name="shadow_closed">';
+
+  // Nested open roots.
+  const n1 = document.getElementById('nested-host').attachShadow({mode:'open'});
+  n1.innerHTML = '<div id="inner-host"></div>';
+  const n2 = n1.getElementById('inner-host').attachShadow({mode:'open'});
+  n2.innerHTML = '<label for="s3">Field nested two shadow roots deep</label><input id="s3" name="shadow_nested">';
+</script>
+</body></html>

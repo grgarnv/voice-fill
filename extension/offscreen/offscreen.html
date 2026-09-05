@@ -2,9 +2,13 @@
 <html>
   <head><meta charset="utf-8"><title>VoiceFill offscreen</title></head>
   <body>
-    <!-- Not user-visible. Owns audio playback, the playback clock, and (from
-         Phase 1) the WebSocket to the backend proxy. -->
+    <!-- Not user-visible. Owns audio playback, the playback clock, the session
+         state machine, turn_id, and the WebSocket to the backend proxy. -->
     <audio id="player"></audio>
+    <!-- Classic script first: it defines globalThis.VFPrompts, which player.js
+         calls. Same file the content script and the test harness load, so a
+         prompt can never differ between what is spoken and what is asserted. -->
+    <script src="../shared/prompts.js"></script>
     <script type="module" src="player.js"></script>
   </body>
 </html>

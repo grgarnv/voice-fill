@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Visibility</title>
+<style>
+  .gone{display:none} .invis{visibility:hidden} .clear{opacity:0}
+  .offscreen{position:absolute;left:-9999px}
+  .sticky-bar{position:fixed;top:0;left:0;right:0;background:#eee;padding:8px}
+  .clipped{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style></head><body>
+<h1>Visible vs not</h1>
+
+<!-- VISIBLE: a position:fixed control. offsetParent is null for these even
+     though they are plainly on screen - the naive check drops them. -->
+<div class="sticky-bar"><label for="v-fixed">Search this site</label><input id="v-fixed" name="fixedsearch"></div>
+
+<form style="margin-top:60px">
+  <label for="v-plain">Street address</label><input id="v-plain" name="plain">
+
+  <input type="hidden" name="csrf_token" value="abc123">
+  <div class="gone"><label for="h1x">Hidden by display none</label><input id="h1x" name="h_display"></div>
+  <div class="invis"><label for="h2x">Hidden by visibility</label><input id="h2x" name="h_vis"></div>
+  <div class="clear"><label for="h3x">Hidden by opacity</label><input id="h3x" name="h_op"></div>
+  <div aria-hidden="true"><label for="h4x">Aria hidden</label><input id="h4x" name="h_aria"></div>
+  <input name="h_attr" hidden>
+  <div class="clipped"><label for="h5x">Clipped a11y text</label><input id="h5x" name="h_clip"></div>
+
+  <button type="submit">Submit</button>
+  <input type="submit" value="Also submit">
+  <input type="button" value="A button">
+  <input type="reset" value="Reset">
+</form>
+</body></html>

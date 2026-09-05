@@ -84,7 +84,7 @@ export async function fetchCatalog() {
  * Open a /ws3 connection. Query params carry speaker/model/format per Rime's
  * flagship WebSocket contract.
  */
-export function openWs3({ speaker, modelId, audioFormat, samplingRate }) {
+export function openWs3({ speaker, modelId, audioFormat, samplingRate, segment, pauseBetweenBrackets }) {
   const c = cfg();
   const u = new URL(c.wsUrl);
   u.searchParams.set('speaker', speaker);
@@ -92,6 +92,11 @@ export function openWs3({ speaker, modelId, audioFormat, samplingRate }) {
   u.searchParams.set('audioFormat', audioFormat);
   u.searchParams.set('lang', c.lang);
   if (samplingRate) u.searchParams.set('samplingRate', String(samplingRate));
+  // Was missing: probe 05 passed segment:'never' and it was silently dropped on
+  // the floor here, so its buffered-cancel result was actually measured under
+  // DEFAULT segmentation. Verified honoured as a query param in Phase 1.
+  if (segment) u.searchParams.set('segment', String(segment));
+  if (pauseBetweenBrackets) u.searchParams.set('pauseBetweenBrackets', 'true');
 
   const ws = new WebSocket(u.toString(), {
     headers: { Authorization: `Bearer ${c.key}` },

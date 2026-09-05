@@ -1,83 +1,500 @@
-// Offscreen: audio playback + playback clock.
+// Offscreen: WebSocket to the proxy, session state machine, turn_id, PCM
+// playback and the playback clock.
 //
-// Phase 0 scope is the bundled-mp3 smoke test. The AudioContext scaffolding is
-// here already because the Phase 3 heard ledger needs a sample-accurate clock,
-// and retrofitting that onto an <audio> element later means rewriting this file.
+// Phase 0 locked all five of these into THIS document rather than the service
+// worker: MV3 workers idle out around 30s against a session that runs for
+// minutes, and every chrome.runtime hop costs 5-20ms against the Phase 3
+// barge-in budget. background.js routes and nothing else.
+//
+// Phase 1 scope: speak prompts, Next/Previous/Repeat. No mic, no barge-in - but
+// turn_id, contextId tagging and the stale-drop are built in now because
+// retrofitting them onto a playing stream later means rewriting this file.
 
 const el = document.getElementById('player');
-let ctx = null;
 
-/** Lazily created: an AudioContext made before a user gesture starts suspended. */
+/* ------------------------------------------------------------ audio ------- */
+
+let ctx = null;
 function audioContext() {
+  // 24 kHz to match Rime's pcm sampling rate exactly. Any other rate makes the
+  // browser resample, which puts the playback clock out of step with the word
+  // timestamps the heard ledger will compare against in Phase 3.
   if (!ctx) ctx = new AudioContext({ sampleRate: 24000 });
   return ctx;
 }
 
-/** Playback position in seconds. Phase 3 filters word timestamps against this. */
-export function playedSeconds() {
-  return el.currentTime;
+const PCM_RATE = 24000;
+const PREBUFFER_SEC = 0.15;   // absorbs network jitter before the first sample
+const SCHEDULE_LEAD = 0.05;
+
+/** base64 -> Int16 -> Float32. Only ever called for a chunk we intend to play. */
+function decodePcmChunk(b64) {
+  const bin = atob(b64);
+  const n = bin.length;
+  const bytes = new Uint8Array(n);
+  for (let i = 0; i < n; i++) bytes[i] = bin.charCodeAt(i);
+  const samples = new Int16Array(bytes.buffer, 0, n >> 1);
+  const f32 = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 32768;
+  return f32;
 }
+
+/* ------------------------------------------------------------ session ----- */
+
+const S = {
+  state: 'IDLE',              // IDLE | CONNECTING | READY | PROMPTING
+  turnId: 0,
+  contextId: null,            // contextId of the utterance currently owning audio
+  fields: [],
+  index: -1,
+  provider: null,
+  ws: null,
+  wsUrl: null,
+  connected: false,
+  prewarmed: false,
+  lastError: null,
+  tabId: null,
+
+  // current utterance
+  utt: null,
+  // Phase 3 will consume these; Phase 1 records them to prove the plumbing.
+  lastWordTimestamps: null,
+  droppedStaleChunks: 0,
+  playedChunks: 0,
+  // Diagnostics: which contextIds actually arrived, and how many chunk frames
+  // in total. Phase 3 debugging needs exactly this when audio does not stop.
+  rawChunkFrames: 0,
+  contextsSeen: {},
+};
+
+const newUtterance = (contextId, text) => ({
+  contextId, text,
+  startedAt: null, nextTime: 0, scheduledSec: 0,
+  chunks: 0, bytes: 0, firstChunkAt: null, sentAt: performance.now(),
+  sources: [], done: false,
+});
+
+/** Playback position within the current utterance, in seconds. */
+function playedSeconds() {
+  const u = S.utt;
+  if (!u || u.startedAt === null || !ctx) return 0;
+  return Math.max(0, Math.min(ctx.currentTime - u.startedAt, u.scheduledSec));
+}
+
+/* --------------------------------------------------------------- ws ------- */
+
+// An offscreen document's API surface is restricted to chrome.runtime -
+// chrome.storage is NOT defined here, and reading it throws. The background
+// service worker owns storage access and hands the config down with the message
+// that needs it.
+let backendCfg = { backendUrl: 'ws://localhost:8787/speak', proxyToken: '' };
+
+function connect() {
+  if (S.ws && (S.ws.readyState === 0 || S.ws.readyState === 1)) return Promise.resolve(S.connected);
+  return Promise.resolve(backendCfg).then(({ backendUrl, proxyToken }) => new Promise((resolve) => {
+    const u = new URL(backendUrl);
+    if (proxyToken) u.searchParams.set('token', proxyToken);
+    S.wsUrl = u.toString();
+    S.state = 'CONNECTING';
+    let settled = false;
+    let ws;
+    try { ws = new WebSocket(S.wsUrl); }
+    catch (e) { S.lastError = String(e.message); S.state = 'IDLE'; return resolve(false); }
+    S.ws = ws;
+
+    const fail = (why) => {
+      if (settled) return; settled = true;
+      S.connected = false; S.state = 'IDLE'; S.lastError = why;
+      resolve(false);
+    };
+
+    ws.addEventListener('open', () => {
+      S.connected = true; S.lastError = null; S.state = 'READY';
+      if (!settled) { settled = true; resolve(true); }
+    });
+    ws.addEventListener('message', (ev) => onFrame(ev.data));
+    ws.addEventListener('error', () => fail('websocket error - is the backend running on :8787?'));
+    ws.addEventListener('close', (e) => {
+      S.connected = false;
+      if (S.state !== 'IDLE') S.state = 'IDLE';
+      if (!settled) fail(`closed before open (${e.code})`);
+    });
+    setTimeout(() => fail('connect timeout'), 8000);
+  }));
+}
+
+/** contextId is echoed on chunk frames (Phase 0 probe 06), field name unassumed. */
+function ctxOf(m) {
+  return m.contextId ?? m.context_id ?? m.context ?? null;
+}
+
+function onFrame(raw) {
+  let m;
+  try { m = JSON.parse(typeof raw === 'string' ? raw : ''); } catch { return; }
+
+  if (m.type === 'proxy_ready') {
+    S.provider = m.provider || null;
+    // Prompts carry <400> pause tokens. They are only spoken as pauses when the
+    // proxy set pauseBetweenBrackets on the URL - it is silently ignored as a
+    // per-message field. If it is off, strip the tokens rather than read them.
+    if (globalThis.VFPromptFlagSink) globalThis.VFPromptFlagSink(!!m.provider?.pauseBetweenBrackets);
+    return;
+  }
+  if (m.type === 'proxy_error') { S.lastError = m.error; return; }
+
+  if (m.type === 'chunk' && typeof m.data === 'string') {
+    const c = ctxOf(m);
+    S.rawChunkFrames++;
+    const seenKey = `${c}|cur=${S.contextId}`;
+    if (S.contextsSeen[seenKey] !== undefined || Object.keys(S.contextsSeen).length < 60) {
+      S.contextsSeen[seenKey] = (S.contextsSeen[seenKey] || 0) + 1;
+    }
+    // ---- THE STALE DROP -------------------------------------------------
+    // Phase 0 constraint 2: discard at the enqueue boundary, BEFORE decode.
+    // The post-cancel tail is 192 chunks / 7.4s arriving inside 811ms; decoding
+    // audio that is about to be thrown away spends the barge-in budget on
+    // nothing. `continue` here is the whole point of tagging every send.
+    if (c !== null && S.contextId !== null && c !== S.contextId) { S.droppedStaleChunks++; return; }
+    if (!S.utt || S.utt.contextId !== S.contextId) return;
+    enqueue(m.data);
+    return;
+  }
+
+  if (m.type === 'timestamps' || m.word_timestamps || m.wordTimestamps) {
+    const wt = m.word_timestamps || m.wordTimestamps || m.timestamps;
+    if (wt && wt.words) S.lastWordTimestamps = { contextId: ctxOf(m), words: wt.words, start: wt.start, end: wt.end };
+    return;
+  }
+
+  if (/^done$/i.test(m.type || '')) {
+    if (S.utt) S.utt.done = true;
+    settleWait(ctxOf(m), 'done');
+    return;
+  }
+}
+
+/** Schedule one chunk. Sequential, gap-free while the stream outruns realtime. */
+function enqueue(b64) {
+  const u = S.utt;
+  const c = audioContext();
+  const f32 = decodePcmChunk(b64);
+  if (f32.length === 0) return;
+
+  const buf = c.createBuffer(1, f32.length, PCM_RATE);
+  buf.copyToChannel(f32, 0);
+
+  if (u.startedAt === null) {
+    u.startedAt = c.currentTime + PREBUFFER_SEC;
+    u.nextTime = u.startedAt;
+    u.firstChunkAt = performance.now();
+  }
+  // If the network fell behind realtime the schedule point is already in the
+  // past; restart just ahead of now rather than scheduling into it (silently
+  // dropped by the Web Audio API).
+  if (u.nextTime < c.currentTime + SCHEDULE_LEAD) u.nextTime = c.currentTime + SCHEDULE_LEAD;
+
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  src.connect(c.destination);
+  src.start(u.nextTime);
+  u.sources.push(src);
+  u.nextTime += buf.duration;
+  u.scheduledSec = u.nextTime - u.startedAt;
+  u.chunks++; u.bytes += f32.length * 2;
+  S.playedChunks++;
+}
+
+/** Cut local audio immediately. Phase 3's barge-in calls this; Repeat/Next too. */
+function stopAudio() {
+  const u = S.utt;
+  if (u) {
+    for (const s of u.sources) { try { s.stop(); } catch {} try { s.disconnect(); } catch {} }
+    u.sources.length = 0;
+  }
+  S.utt = null;
+}
+
+/* ------------------------------------------------------------- speaking --- */
+//
+// Utterances are QUEUED, never fired back to back. Measured against real Rime
+// (tools/verify_ws3_params.mjs and the probe behind it): three text+flush pairs
+// sent on one socket with no gap yield audio for the LAST contextId only - the
+// earlier ones are silently discarded, with no chunks and no `done`. At 250ms
+// spacing all three synthesise.
+//
+//   back-to-back   {"C-prompt":3.38}
+//   250ms apart    {"A-prewarm":0.64,"B-summary":1.71,"C-prompt":1.96}
+//
+// So "speak the summary, then the first question" cannot be two immediate
+// sends: the summary is cancelled and the user never hears it. The queue waits
+// for each `done` before sending the next.
+//
+// Interrupting is the opposite case and stays immediate: when the user presses
+// Next, replacing the in-flight utterance is exactly what should happen.
+
+const Q = [];
+let pumping = false;
+const waiters = new Map();          // contextId -> { resolve, timer }
+
+function settleWait(ctx, why) {
+  const w = waiters.get(ctx);
+  if (!w) return;
+  clearTimeout(w.timer);
+  waiters.delete(ctx);
+  w.resolve(why);
+}
+
+function waitForDone(ctx, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { waiters.delete(ctx); resolve('timeout'); }, ms);
+    waiters.set(ctx, { resolve, timer });
+  });
+}
+
+/** Abandon every pending wait so an interrupting utterance can go out now. */
+function abortWaits() {
+  for (const ctx of [...waiters.keys()]) settleWait(ctx, 'aborted');
+}
+
+async function sendUtterance(item) {
+  const c = audioContext();
+  if (c.state === 'suspended') { try { await c.resume(); } catch {} }
+
+  stopAudio();
+  // Prewarm audio is addressed to a contextId that is never current, so every
+  // chunk it produces takes the same stale-drop path a barge-in will use.
+  S.contextId = item.prewarm ? '__prewarm_discard__' : item.contextId;
+  S.utt = item.prewarm ? null : newUtterance(item.contextId, item.text);
+  if (!item.prewarm) S.state = 'PROMPTING';
+
+  try {
+    S.ws.send(JSON.stringify({ text: item.text, contextId: item.contextId }));
+    // segment=never means nothing synthesises until this flush. Short explicit
+    // flushes are what keep `clear` able to cancel anything in Phase 3.
+    S.ws.send(JSON.stringify({ operation: 'flush' }));
+  } catch (e) {
+    S.lastError = String(e.message);
+    return;
+  }
+
+  // Bounded by the text length: a stuck utterance must not wedge the queue.
+  const budget = Math.min(30000, 4000 + item.text.length * 90);
+  await waitForDone(item.contextId, budget);
+  if (S.state === 'PROMPTING' && !item.prewarm) S.state = 'READY';
+}
+
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  try { while (Q.length) await sendUtterance(Q.shift()); }
+  finally { pumping = false; }
+}
+
+/**
+ * @param interrupt  true  - user asked for something else: drop the queue, cut
+ *                           local audio, and make in-flight chunks stale now.
+ *                   false - must be heard after what is already queued.
+ */
+async function speak(text, { prewarm = false, interrupt = true } = {}) {
+  const ok = await connect();
+  if (!ok) return { ok: false, error: S.lastError || 'not connected' };
+
+  S.turnId += 1;
+  const contextId = prewarm ? `prewarm-${S.turnId}` : `turn-${S.turnId}`;
+
+  if (interrupt) {
+    Q.length = 0;
+    stopAudio();
+    // Advancing the current contextId BEFORE the send makes every chunk still
+    // in flight from the previous turn stale, so it is dropped at the enqueue
+    // boundary rather than decoded and played over the new prompt.
+    S.contextId = contextId;
+    abortWaits();
+  }
+
+  Q.push({ text, contextId, prewarm });
+  pump();
+  return { ok: true, contextId, turnId: S.turnId, text };
+}
+
+/**
+ * Pre-warm (Phase 0 constraint 3): cold TTFA 1475ms vs warm 513ms. 1.5s of
+ * silence after the user clicks Start reads as a broken product.
+ *
+ * Run when the popup opens, NOT inside sessionStart: queued ahead of the
+ * summary it would simply move the same delay in front of the first prompt,
+ * whereas run at popup-open time the socket is already warm by the time Start
+ * is pressed.
+ */
+async function prewarm() {
+  if (S.prewarmed) return { ok: true, already: true };
+  S.prewarmed = true;
+  return speak('Ready.', { prewarm: true, interrupt: false });
+}
+
+/* -------------------------------------------------------------- session --- */
+
+function currentField() {
+  return S.index >= 0 && S.index < S.fields.length ? S.fields[S.index] : null;
+}
+
+/** Ask background to move the page's focus ring. Offscreen has no tabs access. */
+function requestFocus(field) {
+  if (!field) return;
+  try {
+    chrome.runtime.sendMessage({ type: 'VF_FOCUS_FIELD', fieldId: field.id, index: S.index, tabId: S.tabId });
+  } catch {}
+}
+
+async function speakCurrent({ withPosition = true, interrupt = true } = {}) {
+  const f = currentField();
+  if (!f) return { ok: false, error: 'no current field' };
+  requestFocus(f);
+  const prompt = globalThis.VFPrompts.promptFor(f);
+  const text = withPosition ? `${globalThis.VFPrompts.positionFor(S.index, S.fields.length)} ${prompt}` : prompt;
+  const r = await speak(text, { interrupt });
+  return { ...r, field: f, prompt: text };
+}
+
+async function sessionStart({ fields, tabId, backend, speakSummary = true }) {
+  if (backend) backendCfg = { ...backendCfg, ...backend };
+  S.fields = Array.isArray(fields) ? fields : [];
+  S.tabId = tabId ?? S.tabId;
+  S.index = S.fields.length ? 0 : -1;
+  S.droppedStaleChunks = 0; S.playedChunks = 0; S.rawChunkFrames = 0; S.contextsSeen = {};
+
+  const ok = await connect();
+  if (!ok) return { ok: false, error: S.lastError || 'backend not reachable', fieldCount: S.fields.length };
+
+  if (!S.fields.length) {
+    await speak(globalThis.VFPrompts.summaryFor([]));
+    return { ok: true, fieldCount: 0, spoke: 'empty-form' };
+  }
+  if (speakSummary) {
+    // Two separate utterances - one short question per flush keeps `clear`
+    // useful in Phase 3 and matches how the ear parses it. The first interrupts
+    // whatever was playing; the question is QUEUED behind it, because sending
+    // both immediately makes Rime discard the summary entirely.
+    await speak(globalThis.VFPrompts.summaryFor(S.fields), { interrupt: true });
+  }
+  const r = await speakCurrent({ interrupt: !speakSummary });
+  return { ok: true, fieldCount: S.fields.length, index: S.index, prompt: r.prompt, field: r.field };
+}
+
+async function move(delta) {
+  if (!S.fields.length) return { ok: false, error: 'no fields' };
+  const next = S.index + delta;
+  if (next < 0) { await speak('That was the first field.'); return { ok: true, index: S.index, edge: 'start' }; }
+  if (next >= S.fields.length) { await speak('That was the last field.'); return { ok: true, index: S.index, edge: 'end' }; }
+  S.index = next;
+  const r = await speakCurrent();
+  return { ok: true, index: S.index, prompt: r.prompt, field: r.field };
+}
+
+/**
+ * Replace the field list after a DOM mutation without losing the user's place.
+ * Matched by stable id, never by index: an SPA remount renumbers everything.
+ */
+function updateFields(fields) {
+  const prevId = currentField()?.id ?? null;
+  const before = S.fields.length;
+  S.fields = Array.isArray(fields) ? fields : [];
+  if (prevId) {
+    const i = S.fields.findIndex(f => f.id === prevId);
+    S.index = i >= 0 ? i : Math.min(S.index, S.fields.length - 1);
+  } else if (S.fields.length && S.index < 0) {
+    S.index = 0;
+  }
+  return { ok: true, before, after: S.fields.length, index: S.index, keptPointer: !!prevId && S.fields.some(f => f.id === prevId) };
+}
+
+function snapshot() {
+  const f = currentField();
+  return {
+    ok: true,
+    state: S.state, connected: S.connected, provider: S.provider,
+    turnId: S.turnId, contextId: S.contextId,
+    index: S.index, total: S.fields.length,
+    field: f ? { id: f.id, label: f.label, type: f.type, required: f.required, labelSource: f.labelSource, optionCount: f.optionCount } : null,
+    playedSeconds: +playedSeconds().toFixed(3),
+    utterance: S.utt ? { chunks: S.utt.chunks, bytes: S.utt.bytes, scheduledSec: +S.utt.scheduledSec.toFixed(2), text: S.utt.text } : null,
+    lastWordTimestampCount: S.lastWordTimestamps?.words?.length ?? 0,
+    droppedStaleChunks: S.droppedStaleChunks, playedChunks: S.playedChunks,
+    rawChunkFrames: S.rawChunkFrames, contextsSeen: S.contextsSeen,
+    prewarmed: S.prewarmed, lastError: S.lastError, wsUrl: S.wsUrl,
+  };
+}
+
+/* ------------------------------------------------- phase 0 smoke test ----- */
 
 async function playTest() {
   const url = chrome.runtime.getURL('assets/test.mp3');
   const c = audioContext();
-  // Autoplay policy: a suspended context must be resumed inside the gesture chain.
-  // The popup click that triggered this counts.
   if (c.state === 'suspended') await c.resume();
-
   el.src = url;
   const t0 = performance.now();
-
-  // Three distinct moments, previously collapsed into one misleading number:
-  //   startLatency - request to audible. This is what "how responsive is it"
-  //                  means, and what the barge-in budget is measured against.
-  //   playedMs     - audible to finished. Roughly the clip duration.
-  // The old code computed both at the 'ended' event, so it reported the clip's
-  // own length (~720ms) as if it were start latency.
-  let startLatencyMs = null;
-
-  // 'playing' fires at the first rendered frame; play() resolving only means
-  // the request was accepted. Prefer 'playing', fall back to the promise.
   const playing = new Promise(res => el.addEventListener('playing', res, { once: true }));
   await el.play();
   const afterPlayCall = performance.now() - t0;
   await Promise.race([playing, new Promise(r => setTimeout(r, 2000))]);
-  startLatencyMs = Math.round(performance.now() - t0);
-
+  const startLatencyMs = Math.round(performance.now() - t0);
   return new Promise((resolve) => {
     let settled = false;
     const done = (why) => {
-      if (settled) return;
-      settled = true;
+      if (settled) return; settled = true;
       resolve({
-        ok: true,
-        startLatencyMs,                                   // request -> audible
-        playCallMs: Math.round(afterPlayCall),            // request -> play() resolved
+        ok: true, startLatencyMs, playCallMs: Math.round(afterPlayCall),
         playedMs: Math.round(performance.now() - t0 - startLatencyMs),
-        durationSec: el.duration,
-        audioContextState: c.state,
-        endedCleanly: why === 'ended',
+        durationSec: el.duration, audioContextState: c.state, endedCleanly: why === 'ended',
       });
     };
     el.addEventListener('ended', () => done('ended'), { once: true });
-    // Bound by the clip's own length rather than a flat 6s, so a stuck player
-    // is obvious instead of looking like a slow one.
     setTimeout(() => done('timeout'), Math.max(3000, (el.duration || 1) * 1000 + 2000));
   });
 }
+
+/* -------------------------------------------------------------- router ---- */
 
 chrome.runtime.onMessage.addListener((msg, _s, respond) => {
   if (msg?.target !== 'offscreen') return;
   (async () => {
     try {
-      if (msg.type === 'OFF_PLAY_TEST') respond(await playTest());
-      else if (msg.type === 'OFF_CLOCK') respond({ ok: true, playedSeconds: playedSeconds() });
-      else respond({ ok: false, error: `unknown offscreen message ${msg.type}` });
+      switch (msg.type) {
+        case 'OFF_PLAY_TEST':      respond(await playTest()); break;
+        case 'OFF_CLOCK':          respond({ ok: true, playedSeconds: playedSeconds() }); break;
+        case 'OFF_CONNECT': {
+          if (msg.backend) backendCfg = { ...backendCfg, ...msg.backend };
+          const okc = await connect();
+          if (okc && msg.warm !== false) await prewarm();
+          respond({ ok: okc, provider: S.provider, error: S.lastError, prewarmed: S.prewarmed });
+          break;
+        }
+        case 'OFF_PREWARM':        respond(await prewarm()); break;
+        case 'OFF_SESSION_START':  respond(await sessionStart(msg)); break;
+        case 'OFF_NEXT':           respond(await move(+1)); break;
+        case 'OFF_PREV':           respond(await move(-1)); break;
+        case 'OFF_REPEAT':         respond(await speakCurrent()); break;
+        case 'OFF_SPEAK':          respond(await speak(msg.text)); break;
+        case 'OFF_UPDATE_FIELDS':  respond(updateFields(msg.fields)); break;
+        case 'OFF_STATE':          respond(snapshot()); break;
+        case 'OFF_STOP':
+          Q.length = 0; abortWaits(); stopAudio();
+          S.state = 'READY'; S.index = -1; S.fields = [];
+          respond({ ok: true });
+          break;
+        default: respond({ ok: false, error: `unknown offscreen message ${msg.type}` });
+      }
     } catch (e) {
       respond({ ok: false, error: String(e?.message || e) });
     }
   })();
   return true;
 });
+
+// The pause-token guard: prompts stop emitting <400> if the proxy did not set
+// the query param, so the tokens can never be read aloud as literal text.
+globalThis.VFPromptFlagSink = (enabled) => {
+  if (globalThis.VFPrompts) globalThis.VFPrompts.setPauseEnabled(enabled);
+};
 
 console.log('[VoiceFill] offscreen document loaded');

@@ -5,6 +5,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
+import os from 'node:os';
 import WebSocket from 'ws';
 
 const rows = [];
@@ -146,8 +147,16 @@ t('No secrets committed', 'LOCAL', () => {
   walk('.');
   if (hits.length) throw new Error(hits.join(', '));
   if (!fs.readFileSync('.gitignore', 'utf8').includes('.env')) throw new Error('.gitignore does not exclude .env');
-  if (fs.existsSync('.env')) throw new Error('.env exists in the tree - must never be committed');
-  return '.env.example only, .gitignore correct';
+  // This used to fail whenever .env merely EXISTED - which the README's own
+  // setup step (`cp .env.example .env`) guarantees for every developer. The
+  // question is not whether the file is on disk, it is whether git tracks it.
+  try {
+    const tracked = execFileSync('git', ['ls-files', '--error-unmatch', '.env'], { stdio: 'pipe' }).toString().trim();
+    if (tracked) throw new Error('.env is TRACKED BY GIT - remove it from the index immediately');
+  } catch (e) {
+    if (/TRACKED BY GIT/.test(String(e.message))) throw e;   // real failure, not "not found"
+  }
+  return fs.existsSync('.env') ? '.env present locally, untracked, .gitignore correct' : '.env.example only';
 });
 
 // ---- runtime checks --------------------------------------------------------
@@ -163,11 +172,20 @@ const waitPort = async (port, ms = 6000) => {
 
 let backend = null;
 t('Backend boots and serves /health + /provider', 'LOCAL', async () => {
+  // Refuse to test a server we did not start. A leftover proxy on this port
+  // answers /health perfectly well and then rejects the selftest's token,
+  // which surfaces as two unrelated PLUMBING failures.
+  if (await waitPort(8787, 300)) {
+    throw new Error('port 8787 is already in use - stop the other backend first (lsof -ti:8787 | xargs kill)');
+  }
   backend = spawn('node', ['backend/server.mjs'], {
     env: { ...process.env, PORT: '8787', PROXY_TOKEN: 'selftest', RIME_API_KEY: 'rime_sk_PLACEHOLDER_NOT_REAL', RIME_WS_URL: 'ws://127.0.0.1:8799' },
     stdio: 'pipe',
   });
-  if (!await waitPort(8787)) throw new Error('backend did not listen on 8787');
+  let bootErr = '';
+  backend.stderr.on('data', d => { bootErr += d.toString(); });
+  if (!await waitPort(8787)) throw new Error(`backend did not listen on 8787: ${bootErr.slice(-160)}`);
+  if (/EADDRINUSE/.test(bootErr)) throw new Error('backend could not bind 8787 (EADDRINUSE)');
   const h = await (await fetch('http://127.0.0.1:8787/health')).json();
   const p = await (await fetch('http://127.0.0.1:8787/provider')).json();
   if (!h.ok) throw new Error('health not ok');
@@ -243,11 +261,49 @@ for (const host of ['users.rime.ai', 'users-ws.rime.ai', 'optimize.rime.ai']) {
   });
 }
 
+// Searching only PATH reported BLOCKED on a machine with Chrome installed:
+// macOS puts it in an .app bundle and never on PATH. A false BLOCKED is worse
+// than a FAIL - it reads as "environment problem, not my code" and gets skipped.
 t('Chrome binary available', 'EXTERNAL', () => {
+  const paths = [
+    process.env.CHROME_PATH,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+    '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  ].filter(Boolean);
+  for (const p of paths) {
+    try { if (fs.existsSync(p)) return execFileSync(p, ['--version'], { stdio: 'pipe' }).toString().trim(); } catch {}
+  }
   for (const c of ['google-chrome', 'chromium', 'chromium-browser']) {
     try { return execFileSync(c, ['--version'], { stdio: 'pipe' }).toString().trim(); } catch {}
   }
-  throw new Error('no Chrome/Chromium binary on PATH');
+  throw new Error('no Chrome/Chromium in the usual locations or on PATH');
+});
+
+// Loading the unpacked extension needs Chrome for Testing: Chrome stable 137+
+// ignores --load-extension entirely (verified on 152, headless and headful).
+t('Chrome for Testing available (needed to load the extension)', 'EXTERNAL', () => {
+  const roots = [process.env.CHROME_TEST_PATH, process.env.CHROME_TEST_DIR,
+    path.join(process.env.CLAUDE_JOB_DIR || '', 'tmp', 'browsers'),
+    path.join(os.homedir(), '.cache', 'puppeteer'),
+    path.join(process.cwd(), '.cache', 'browsers')].filter(Boolean);
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    if (fs.statSync(root).isFile()) return root;
+    const stack = [root];
+    while (stack.length) {
+      const d = stack.pop();
+      let entries = [];
+      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        const full = path.join(d, e.name);
+        if (e.isDirectory()) { if (stack.length < 400) stack.push(full); }
+        else if (e.name === 'Google Chrome for Testing' || e.name === 'chrome') return full;
+      }
+    }
+  }
+  throw new Error('not installed - npx @puppeteer/browsers install chrome@stable --path .cache/browsers');
 });
 
 // ---- run -------------------------------------------------------------------
