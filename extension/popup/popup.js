@@ -128,7 +128,16 @@ async function pttDown(e) {
   $('ptt').classList.add('live');
   $('ptt').textContent = 'Listening — release to send';
   $('heard').textContent = '';
-  await send({ type: 'VF_LISTEN_START' });
+  const r = await send({ type: 'VF_LISTEN_START' });
+  // If the mic never opened there is no turn to stop. Say why, instead of
+  // letting release report the meaningless "not listening".
+  if (r && !r.ok && !r.already) {
+    pttHeld = false;
+    $('ptt').classList.remove('live');
+    $('ptt').textContent = 'Hold to speak';
+    $('heard').textContent = `mic: ${String(r.error || 'failed').slice(0, 56)}`;
+    if (/permission|notallowed|denied|dismissed/i.test(r.error || '')) $('mic-row').hidden = false;
+  }
 }
 
 async function pttUp() {
@@ -160,6 +169,48 @@ $('play').addEventListener('click', async () => {
   if (r?.ok) set('audio', 'ok', `${r.startLatencyMs}ms start, ${r.playedMs}ms played`);
   else set('audio', 'bad', (r?.error || 'failed').slice(0, 22));
   await refreshDiagnostics();
+});
+
+/* ------------------------------------------------------- proxy token ---- */
+
+// The backend's /speak upgrade and /stt both 401 without PROXY_TOKEN. The
+// offscreen document reads it from chrome.storage.local, so saving it here and
+// reconnecting is all that is needed - no reload of the extension.
+{
+  const d = await chrome.storage.local.get(['proxyToken']);
+  $('token').value = d.proxyToken || '';
+  $('token-row').hidden = !!d.proxyToken;
+  $('token-msg').textContent = d.proxyToken ? '' : 'Backend needs PROXY_TOKEN from .env before it will speak';
+}
+/* --------------------------------------------------- mic permission ---- */
+
+// The popup shares the extension origin, so it can read the mic permission
+// state even though the capture happens in the offscreen document.
+async function refreshMic() {
+  try {
+    const p = await navigator.permissions.query({ name: 'microphone' });
+    $('mic-row').hidden = p.state === 'granted';
+    $('mic-msg').textContent = p.state === 'denied'
+      ? 'Microphone blocked for this extension - allow it on the permission page'
+      : 'Push-to-talk needs microphone access before it can hear you';
+    p.onchange = refreshMic;
+  } catch { /* leave hidden; a failed listen still reveals the row */ }
+}
+$('mic-allow').addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('permission/permission.html') });
+});
+await refreshMic();
+
+$('token-edit').addEventListener('click', () => { $('token-row').hidden = false; $('token').focus(); });
+$('token-save').addEventListener('click', async () => {
+  const proxyToken = $('token').value.trim();
+  await chrome.storage.local.set({ proxyToken });
+  $('token-msg').textContent = 'saved, reconnecting';
+  const r = await send({ type: 'VF_CONNECT' });
+  $('token-msg').textContent = r?.ok ? 'connected' : `still failing: ${r?.error || 'unknown'}`;
+  if (r?.ok) $('token-row').hidden = true;
+  await refreshDiagnostics();
+  await refreshState();
 });
 
 await refreshDiagnostics();

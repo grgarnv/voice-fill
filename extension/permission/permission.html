@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VoiceFill · microphone</title>
+<style>
+  body { max-width: 520px; margin: 48px auto; padding: 0 20px; background:#12161c; color:#eef2f6;
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { color:#8a95a3; margin: 0 0 18px; }
+  button { padding: 12px 18px; border-radius: 8px; border: 1px solid #31538a; background:#1d3a5c;
+           color:#eef2f6; font-size: 15px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity:.5; cursor: default; }
+  #status { margin-top: 18px; padding: 12px 14px; border-radius: 8px; border: 1px solid #2a323d;
+            font-family: ui-monospace, Menlo, monospace; font-size: 13px; min-height: 20px; }
+  .ok { border-color:#3fbf7f; color:#3fbf7f; } .bad { border-color:#e0574a; color:#e0574a; }
+</style>
+</head>
+<body>
+  <h1>Allow VoiceFill to use your microphone</h1>
+  <p>Push-to-talk records inside an offscreen document, and Chrome never shows a
+     permission prompt for those. This page asks once, on a visible tab; the
+     grant is remembered for the extension, and you can close this tab afterwards.</p>
+  <button id="ask">Allow microphone</button>
+  <div id="status">not asked yet</div>
+  <script src="permission.js"></script>
+</body>
+</html>

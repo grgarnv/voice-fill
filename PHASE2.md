@@ -179,6 +179,22 @@ to talk, so capture only ever caught silence. The file loops now, and the
 mic-path assertion is about chain integrity — what STT heard is what landed —
 because the surname depends on where the loop was when capture opened.
 
+**Two things the harness did for itself that a person cannot.** Found on the
+first manual run in stock Chrome, after the suites were green. The proxy token
+was injected into `chrome.storage.local` over CDP, so the popup never needed a
+way to enter it — and had none; every `/speak` upgrade 401'd, which the browser
+reports as a bare websocket error. The microphone was granted by
+`--use-fake-ui-for-media-stream`; without it, `getUserMedia` in the offscreen
+document fails outright, because Chrome does not show permission prompts for
+offscreen documents. The popup now has a token field, and
+`extension/permission/permission.html` asks for the microphone once from a
+visible tab. A green harness proves the chain, not the onboarding.
+
+**Losing `WHISPER_MODEL` turned every answer into "I didn't catch that".** The
+backend fell back to reporting `browser-webspeech` while the extension kept
+posting to `/stt`, and the error was only visible in the JSON body. `stt.mjs`
+now discovers a model in `.cache/whisper/` when the env line is missing.
+
 **The full-form walk navigates by label.** A forward-only walk sat on the last
 field and ran every command test against it; four assertions failed for one
 reason. `gotoField` turns around at an edge.
@@ -216,6 +232,7 @@ user cannot see. "Did you mean Dermatology, or Neurology?"
 | Web Speech is untested end to end here | It returns nothing in an automated browser. Both providers share one interface and the backend path proves the rest of the chain; the browser path needs a human at a real microphone. |
 | Read-back numbers are single-sample and vary run to run | ±1–2 items between runs on the weaker models. The per-model table on identical clips is the stable presentation. |
 | The name phoneme dictionary is empty | `speakName` wraps known names in braces for `phonemizeBetweenBrackets` and falls back to the raw word. `tools/build_names.mjs` (Phase 5) fills it from `/phonemize`. |
+| Manual run verified on one machine | Stock Chrome, macOS, 2026-09-05, one user. The token and microphone onboarding was found and fixed there; other profiles and OSes have not been tried. |
 | Confusable letters on the STT side | The read-back anchors them; a user spelling *back* is covered ("B as in Bravo", "B for Bravo", bare NATO), but a bare "B" over a poor microphone is still a bare B. |
 
 ---

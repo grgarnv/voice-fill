@@ -227,6 +227,31 @@ If nothing plays, open the offscreen document's console:
 
 ---
 
+## 11b. Fill a form by voice (Phase 2, by hand)
+
+The harness sets these two things through DevTools and a fake-media flag. A
+person has to do them once per Chrome profile.
+
+1. Restart the backend if you added `WHISPER_MODEL` to `.env` after starting
+   it, then check `curl localhost:8787/provider` reports `"stt":"backend-whisper"`.
+   `browser-webspeech` means no model was found; run `npm run stt:install`.
+2. Open a form — `https://httpbin.org/forms/post` is a good first one — and
+   click the VoiceFill icon.
+3. Under the provider badge, paste the `PROXY_TOKEN` from `.env` and click
+   **Save**. The Rime socket row goes green and the badge shows the speaker.
+   Until this is done every request is a 401, which the popup can only show as
+   "websocket error – is the backend running on :8787?"
+4. Click **Allow microphone**. A tab opens with one button; click it, accept
+   Chrome's prompt, close the tab. Offscreen documents cannot prompt, so the
+   grant has to come from a visible extension page.
+5. Press **Start**. Hold **Hold to speak** or the spacebar while you answer,
+   release, and watch the `heard:` line. The value is written, read back, and
+   you say yes or no.
+
+If holding to speak fails, the line under the button now says why (`mic: …`).
+
+---
+
 ## 12. Verify the exit criteria
 
 | # | Criterion | How you confirmed it |
@@ -249,6 +274,7 @@ All four, plus both ear checks, and Phase 0 is genuinely done.
 | `npm run catalog` | no | Print the voice catalog's structure |
 | `npm run selftest` | yes | Local checks only; proves nothing about Rime |
 | `npm run backend` | yes | Proxy on :8787, holds the API key |
+| `npm run stt:install` | no | whisper.cpp via Homebrew + medium.en model into `.cache/whisper` |
 
 ---
 

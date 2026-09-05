@@ -24,10 +24,26 @@ import path from 'node:path';
 
 const exec = promisify(execFile);
 
+/**
+ * WHISPER_MODEL wins. Without it, fall back to whatever `npm run stt:install`
+ * left in .cache/whisper/, largest first - the Phase 2 table showed medium.en
+ * recovering digits the smaller models drop. Losing the env line must not
+ * silently turn every answer into "I didn't catch that".
+ */
+function discoverModel() {
+  const dir = path.resolve(process.cwd(), '.cache', 'whisper');
+  try {
+    const order = ['medium', 'small', 'base', 'tiny'];
+    const bins = fs.readdirSync(dir).filter(f => /^ggml-.*\.bin$/.test(f));
+    bins.sort((a, b) => order.findIndex(o => a.includes(o)) - order.findIndex(o => b.includes(o)));
+    return bins.length ? path.join(dir, bins[0]) : '';
+  } catch { return ''; }
+}
+
 export function sttConfig() {
   return {
     bin: process.env.WHISPER_BIN || 'whisper-cli',
-    model: process.env.WHISPER_MODEL || '',
+    model: process.env.WHISPER_MODEL || discoverModel(),
     rate: Number(process.env.STT_RATE || 16000),
   };
 }

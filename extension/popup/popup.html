@@ -6,6 +6,7 @@
 <style>
   :root { --ink:#12161c; --line:#2a323d; --dim:#8a95a3; --ok:#3fbf7f; --bad:#e0574a; --wait:#c9a227; --fg:#eef2f6; --accent:#6ea8fe; }
   * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
   body { width: 340px; margin:0; padding:14px 16px 16px; background: var(--ink); color: var(--fg);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; letter-spacing: -0.01em; }
@@ -46,7 +47,7 @@
 </head>
 <body>
   <h1>VoiceFill</h1>
-  <p class="sub">Phase 1 — reads the form aloud</p>
+  <p class="sub">Phase 2 — fills the form by voice, push-to-talk</p>
 
   <!-- Required active-provider disclosure (PRD F1.5). Populated from the
        backend's /provider payload, which is the same config used to open the
@@ -54,6 +55,27 @@
   <div class="badge">
     Speaking via <strong>Rime</strong> · <code id="model">mistv2</code> · <code id="speaker">not set</code>
     <div class="line2"><span id="fmt">pcm</span> · <span id="endpoint">/ws3</span> · <span id="seg">segment=never</span></div>
+  </div>
+
+  <!-- The proxy refuses /speak and /stt without PROXY_TOKEN. The harness sets
+       it through chrome.storage; a human needs somewhere to type it. Shown
+       here, above the fold, until a token is saved. -->
+  <div id="token-row" hidden>
+    <div class="row" style="margin-bottom:4px">
+      <input id="token" type="password" placeholder="PROXY_TOKEN from .env" autocomplete="off"
+             style="flex:1;min-width:0;padding:8px;border-radius:6px;border:1px solid var(--line);background:#1c2430;color:var(--fg);font-size:13px">
+      <button id="token-save" class="primary" style="flex:none">Save</button>
+    </div>
+    <div class="heard" id="token-msg">&nbsp;</div>
+  </div>
+
+  <!-- Offscreen documents cannot show Chrome's microphone prompt, so the grant
+       has to come from a visible extension page. Shown until it is granted. -->
+  <div id="mic-row" hidden>
+    <div class="row" style="margin-bottom:4px">
+      <button id="mic-allow" class="primary">Allow microphone</button>
+    </div>
+    <div class="heard" id="mic-msg">Push-to-talk needs microphone access before it can hear you</div>
   </div>
 
   <div class="field">
@@ -87,6 +109,7 @@
     <div class="check"><span class="dot" id="d-audio"></span><span class="name">Audio playback</span><span class="val" id="v-audio">not run</span></div>
     <div class="check"><span class="dot" id="d-csp"></span><span class="name">Page CSP</span><span class="val" id="v-csp">unknown</span></div>
     <button id="play" style="width:100%;margin-top:10px">Play test tone on this page</button>
+    <button id="token-edit" style="width:100%;margin-top:6px">Change proxy token</button>
   </details>
 
   <script type="module" src="popup.js"></script>
