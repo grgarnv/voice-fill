@@ -17,7 +17,13 @@
     "test:e2e": "node tools/test_e2e.mjs",
     "test:exit": "node tools/test_phase1_exit.mjs",
     "phase1": "node tools/phase1.mjs",
-    "browser": "npx @puppeteer/browsers install chrome@stable --path .cache/browsers"
+    "browser": "npx @puppeteer/browsers install chrome@stable --path .cache/browsers",
+    "test:normalize": "node tools/test_normalize.mjs",
+    "test:domwrite": "node tools/test_domwrite.mjs",
+    "test:readback": "node tools/test_readback.mjs",
+    "test:voicefill": "node tools/test_voicefill.mjs",
+    "phase2": "node tools/phase2.mjs",
+    "stt:install": "brew install whisper-cpp && mkdir -p .cache/whisper && curl -L -o .cache/whisper/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin"
   },
   "dependencies": {
     "ws": "^8.18.0"

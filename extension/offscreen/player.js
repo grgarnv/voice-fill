@@ -65,7 +65,21 @@ const S = {
   // in total. Phase 3 debugging needs exactly this when audio does not stop.
   rawChunkFrames: 0,
   contextsSeen: {},
+
+  // ---- Phase 2 -------------------------------------------------------------
+  sttProvider: 'backend',     // 'backend' | 'webspeech'
+  listening: false,
+  liveTurn: null,             // handle for the in-flight web-speech turn
+  pending: null,              // { value, display, intent, fieldId } awaiting yes/no
+  attempts: {},               // fieldId -> failed attempts, for the retry cap
+  filled: {},                 // fieldId -> value actually written
+  lastTranscript: null,
+  lastStt: null,
 };
+
+// Two failures on one field is the point at which repeating the question stops
+// being help and starts being a trap; the PRD's error-recovery loop caps it.
+const MAX_ATTEMPTS = 2;
 
 const newUtterance = (contextId, text) => ({
   contextId, text,
@@ -332,6 +346,255 @@ async function prewarm() {
   return speak('Ready.', { prewarm: true, interrupt: false });
 }
 
+/* ------------------------------------------------------ Phase 2: filling -- */
+
+const NORM = () => globalThis.VFNormalize;
+const STT = () => globalThis.VFStt;
+
+/** Ask the page to write a value, via background - offscreen has no tabs access. */
+async function writeToPage(fieldId, type, value) {
+  try {
+    return await chrome.runtime.sendMessage({
+      type: 'VF_WRITE_FIELD', tabId: S.tabId, fieldId, fieldType: type, value,
+    });
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+async function readFromPage(fieldId) {
+  try {
+    return await chrome.runtime.sendMessage({ type: 'VF_READ_FIELD', tabId: S.tabId, fieldId });
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+const intentOf = (field) => globalThis.VFPrompts.classify(field);
+
+/* ------------------------------------------------------------ listening -- */
+
+async function listenStart() {
+  if (S.listening) return { ok: true, already: true };
+  S.listening = true;
+  S.state = 'LISTENING';
+  try {
+    if (S.sttProvider === 'webspeech') {
+      S.liveTurn = STT().webSpeechTurn({ maxMs: 15000 });
+    } else {
+      await STT().backendStart({ workletUrl: chrome.runtime.getURL('offscreen/recorder-worklet.js') });
+    }
+    return { ok: true, provider: S.sttProvider };
+  } catch (e) {
+    S.listening = false;
+    S.state = 'READY';
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+/**
+ * Release: finish the turn, transcribe, and act on it.
+ *
+ * Push-to-talk is the default the PRD asks for, and it is what makes Phase 1's
+ * playback and Phase 2's capture able to share one device without the mic
+ * hearing Rime.
+ */
+async function listenStop() {
+  if (!S.listening) return { ok: false, error: 'not listening' };
+  S.listening = false;
+
+  let r;
+  if (S.sttProvider === 'webspeech') {
+    S.liveTurn?.stop();
+    r = await (S.liveTurn?.promise ?? Promise.resolve({ ok: false, text: '', error: 'no turn' }));
+    S.liveTurn = null;
+  } else {
+    const url = new URL(backendCfg.backendUrl);
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    url.pathname = '/stt';
+    r = await STT().backendStop({ backendUrl: url.toString(), proxyToken: backendCfg.proxyToken });
+  }
+
+  S.lastStt = r;
+  S.lastTranscript = r.text || null;
+
+  if (!r.ok || !r.text) {
+    S.state = 'READY';
+    // A silent turn is the single most common thing that goes wrong, and
+    // saying nothing about it leaves the user with no idea whether the system
+    // is broken or simply did not hear them.
+    await speak("I didn't catch that. " + pauseToken(300) + 'Try again, holding the key while you speak.');
+    return { ok: false, error: r.error || (r.silent ? 'mic captured silence' : 'no speech'), transcript: '',
+             seconds: r.seconds, peak: r.peak };
+  }
+  return handleTranscript(r.text);
+}
+
+const pauseToken = (ms) => (globalThis.VFPrompts.getPauseEnabled() ? `<${ms}> ` : '');
+
+/* ------------------------------------------------------------- the loop -- */
+
+async function handleTranscript(transcript) {
+  const N = NORM();
+  const field = currentField();
+
+  // A yes/no answer to a pending confirmation outranks everything: the user is
+  // answering the question that was just asked, not starting a new one.
+  if (S.pending) return resolveConfirmation(transcript);
+
+  const cmd = N.parseCommand(transcript);
+  if (cmd) return runCommand(cmd.command, transcript);
+
+  if (!field) { await speak('There is no field selected. Say start to begin.'); return { ok: false, error: 'no field' }; }
+
+  const intent = intentOf(field);
+  const ex = N.fromSpeech(transcript, field, intent);
+
+  if (ex.ambiguous) {
+    // Two options scored alike. Guessing here is a coin flip the user cannot
+    // see, so ask instead.
+    await speak(`Did you mean ${ex.best}, ${pauseToken(300)}or ${ex.runnerUp}?`);
+    return { ok: false, ambiguous: true, transcript, options: [ex.best, ex.runnerUp] };
+  }
+
+  if (ex.value === null || ex.value === undefined) {
+    return failAttempt(field, ex.note || 'I could not use that', transcript);
+  }
+
+  return fillAndConfirm(field, intent, ex, transcript);
+}
+
+async function fillAndConfirm(field, intent, ex, transcript) {
+  const N = NORM();
+  S.state = 'FILLING';
+  const w = await writeToPage(field.id, field.type, ex.value);
+
+  if (!w?.ok) {
+    return failAttempt(field, w?.error || 'the page would not accept that value', transcript);
+  }
+
+  // F2.7: the page gets the last word on whether the value is acceptable.
+  if (w.valid === false) {
+    S.attempts[field.id] = (S.attempts[field.id] || 0) + 1;
+    const reason = String(w.reason || 'that value was not accepted').replace(/\s+/g, ' ').slice(0, 120);
+    if (S.attempts[field.id] >= MAX_ATTEMPTS) {
+      await speak(`${reason}. ${pauseToken(300)}I'll leave this one for now and come back to it.`);
+      S.state = 'READY';
+      return move(+1);
+    }
+    await speak(`${reason}. ${pauseToken(300)}Let's try again.`);
+    S.state = 'READY';
+    await speakCurrent({ interrupt: false });
+    return { ok: false, invalid: true, reason, attempts: S.attempts[field.id] };
+  }
+
+  S.filled[field.id] = ex.value;
+
+  // F2.5: confirm where a wrong value is expensive. Free text is confirmed in
+  // bulk at the end rather than one question at a time.
+  const mustConfirm = N.isHighRisk(intent) || ex.needsConfirmation;
+  if (!mustConfirm) {
+    S.state = 'READY';
+    await speak(`Got it.`, { interrupt: false });
+    return move(+1);
+  }
+
+  // Read back what is ACTUALLY in the field, not what we meant to write: a
+  // masked or coercing input may have changed it, and the user must hear the
+  // truth rather than our intention.
+  const actual = w.current != null && String(w.current).length ? String(w.current) : String(ex.value);
+  const spoken = N.toSpeech(actual, intent) || String(ex.display ?? actual);
+  S.pending = { value: ex.value, actual, display: ex.display ?? actual, intent, fieldId: field.id };
+  S.state = 'CONFIRMING';
+  // "Let me read that back" rather than "Got it": measured 10/10 against 6/10
+  // through the round trip. A short carrier leaves the recogniser to pluralise
+  // the first digits ("zero zero" -> "zeros"), which silently loses one. It
+  // also tells a user who cannot see the screen what is about to happen.
+  await speak(`Let me read that back. ${pauseToken(300)}${spoken}. ${pauseToken(400)}Is that correct?`,
+              { interrupt: false });
+  return { ok: true, confirming: true, value: ex.value, actual, spoken };
+}
+
+async function resolveConfirmation(transcript) {
+  const N = NORM();
+  const p = S.pending;
+  const yes = N.parseYesNo(transcript);
+
+  if (yes === true) {
+    S.pending = null;
+    S.attempts[p.fieldId] = 0;
+    S.state = 'READY';
+    return move(+1);
+  }
+
+  if (yes === false) {
+    S.pending = null;
+    S.state = 'READY';
+    await speak(`Let's try that again.`, { interrupt: true });
+    await speakCurrent({ interrupt: false });
+    return { ok: true, rejected: true, fieldId: p.fieldId };
+  }
+
+  // Not a yes or a no. A correction spoken straight into the confirmation is
+  // the common case ("no, it's 160072" without the "no"), so try to read it as
+  // a fresh answer before giving up.
+  const field = S.fields.find(f => f.id === p.fieldId);
+  const ex = field ? N.fromSpeech(transcript, field, p.intent) : { value: null };
+  if (ex.value !== null && ex.value !== undefined && String(ex.value) !== String(p.value)) {
+    S.pending = null;
+    return fillAndConfirm(field, p.intent, ex, transcript);
+  }
+
+  await speak(`Sorry - ${pauseToken(200)}is that correct? ${pauseToken(300)}Say yes or no.`);
+  return { ok: false, error: 'not a yes or no', transcript };
+}
+
+async function failAttempt(field, note, transcript) {
+  S.attempts[field.id] = (S.attempts[field.id] || 0) + 1;
+  S.state = 'READY';
+  if (S.attempts[field.id] >= MAX_ATTEMPTS) {
+    await speak(`I'm still not getting that. ${pauseToken(300)}I'll skip this one - you can come back to it.`);
+    return move(+1);
+  }
+  await speak(`Sorry, I didn't get that.`, { interrupt: true });
+  await speakCurrent({ interrupt: false });
+  return { ok: false, error: note, transcript, attempts: S.attempts[field.id] };
+}
+
+/* ---------------------------------------------------------- commands F2.6 */
+
+async function runCommand(command, transcript) {
+  const field = currentField();
+  switch (command) {
+    case 'repeat':   await speakCurrent(); return { ok: true, command };
+    case 'next':     return move(+1);
+    case 'previous': return move(-1);
+    case 'stop':     Q.length = 0; abortWaits(); stopAudio(); S.state = 'READY';
+                     await speak('Stopped.'); return { ok: true, command };
+    case 'skip':
+      if (field) S.attempts[field.id] = 0;
+      await speak('Skipped.', { interrupt: true });
+      return move(+1);
+    case 'readback': {
+      if (!field) { await speak('Nothing is selected.'); return { ok: true, command }; }
+      const r = await readFromPage(field.id);
+      const cur = r?.current;
+      if (cur === null || cur === undefined || cur === '') {
+        await speak(`${field.label || 'This field'} is empty.`);
+      } else {
+        const spoken = NORM().toSpeech(String(cur), intentOf(field)) || String(cur);
+        await speak(`${field.label || 'This field'} contains ${pauseToken(200)}${spoken}.`);
+      }
+      return { ok: true, command, current: cur };
+    }
+    case 'help':
+      await speak(`Say your answer, ${pauseToken(200)}or say repeat, ${pauseToken(200)}next, ${pauseToken(200)}back, ${pauseToken(200)}skip, ${pauseToken(200)}or what did you enter.`);
+      return { ok: true, command };
+    default:
+      return { ok: false, error: `unknown command ${command}` };
+  }
+}
+
 /* -------------------------------------------------------------- session --- */
 
 function currentField() {
@@ -362,6 +625,7 @@ async function sessionStart({ fields, tabId, backend, speakSummary = true }) {
   S.tabId = tabId ?? S.tabId;
   S.index = S.fields.length ? 0 : -1;
   S.droppedStaleChunks = 0; S.playedChunks = 0; S.rawChunkFrames = 0; S.contextsSeen = {};
+  S.pending = null; S.attempts = {}; S.filled = {}; S.lastTranscript = null; S.lastStt = null;
 
   const ok = await connect();
   if (!ok) return { ok: false, error: S.lastError || 'backend not reachable', fieldCount: S.fields.length };
@@ -422,6 +686,10 @@ function snapshot() {
     droppedStaleChunks: S.droppedStaleChunks, playedChunks: S.playedChunks,
     rawChunkFrames: S.rawChunkFrames, contextsSeen: S.contextsSeen,
     prewarmed: S.prewarmed, lastError: S.lastError, wsUrl: S.wsUrl,
+    sttProvider: S.sttProvider, listening: S.listening,
+    pending: S.pending ? { display: S.pending.display, intent: S.pending.intent, fieldId: S.pending.fieldId } : null,
+    lastTranscript: S.lastTranscript, lastSttError: S.lastStt?.error ?? null,
+    attempts: S.attempts, filled: S.filled, filledCount: Object.keys(S.filled).length,
   };
 }
 
@@ -477,8 +745,15 @@ chrome.runtime.onMessage.addListener((msg, _s, respond) => {
         case 'OFF_SPEAK':          respond(await speak(msg.text)); break;
         case 'OFF_UPDATE_FIELDS':  respond(updateFields(msg.fields)); break;
         case 'OFF_STATE':          respond(snapshot()); break;
+        case 'OFF_LISTEN_START':   respond(await listenStart()); break;
+        case 'OFF_LISTEN_STOP':    respond(await listenStop()); break;
+        case 'OFF_TRANSCRIPT':     respond(await handleTranscript(msg.text)); break;
+        case 'OFF_SET_STT':        S.sttProvider = msg.provider === 'webspeech' ? 'webspeech' : 'backend';
+                                   respond({ ok: true, provider: S.sttProvider }); break;
         case 'OFF_STOP':
           Q.length = 0; abortWaits(); stopAudio();
+          try { STT().releaseMic(); } catch {}
+          S.listening = false; S.pending = null;
           S.state = 'READY'; S.index = -1; S.fields = [];
           respond({ ok: true });
           break;

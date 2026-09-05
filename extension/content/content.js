@@ -10,6 +10,7 @@
   console.log(`[VoiceFill] content script loaded (${where}) on ${location.origin}`);
 
   const FG = globalThis.VFFieldGraph;
+  const DW = globalThis.VFDomWrite;
 
   /** Live graph: serialisable records for messaging, elements kept here. */
   let graph = { fields: [], elements: [], skipped: null, scannedAt: 0 };
@@ -25,10 +26,17 @@
     return graph;
   }
 
+  const indexFor = (fieldId) => graph.fields.findIndex(f => f.id === fieldId);
+
+  /** The element(s) for a field. Groups keep their whole list - a radio group
+   *  is written by clicking one of several, not by touching the first. */
+  const elementsFor = (fieldId) => {
+    const i = indexFor(fieldId);
+    return i < 0 ? null : graph.elements[i];
+  };
+
   const elementFor = (fieldId) => {
-    const i = graph.fields.findIndex(f => f.id === fieldId);
-    if (i < 0) return null;
-    const e = graph.elements[i];
+    const e = elementsFor(fieldId);
     return Array.isArray(e) ? e[0] : e;
   };
 
@@ -186,6 +194,34 @@
       case 'VF_FOCUS_FIELD':
         respond(focusField(msg.fieldId));
         return true;
+
+      // ---- Phase 2: write, validate, read back -------------------------
+      case 'VF_WRITE_FIELD': {
+        const els = elementsFor(msg.fieldId);
+        if (!els) { respond({ ok: false, error: 'field not found - the page may have re-rendered' }); return true; }
+        const i = indexFor(msg.fieldId);
+        // msg.type is the MESSAGE type; the field's type travels as fieldType.
+        const type = msg.fieldType || graph.fields[i]?.type;
+        const w = DW.write(els, type, msg.value);
+        // Validation is read AFTER the write and after the blur, because that
+        // is when a page decides to complain.
+        const v = DW.validate(els);
+        respond({
+          ok: !!w.ok, written: w.written, error: w.error || null,
+          valid: v.valid, reason: v.reason, validationSource: v.source,
+          current: DW.readCurrent(els, type),
+        });
+        return true;
+      }
+
+      case 'VF_READ_FIELD': {
+        const els = elementsFor(msg.fieldId);
+        if (!els) { respond({ ok: false, error: 'field not found' }); return true; }
+        const i = indexFor(msg.fieldId);
+        const type = graph.fields[i]?.type;
+        respond({ ok: true, current: DW.readCurrent(els, type), validity: DW.validate(els) });
+        return true;
+      }
 
       case 'VF_CLEAR_FOCUS':
         ringTarget = null; currentId = null; hideRing();

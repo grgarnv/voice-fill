@@ -10,6 +10,7 @@ loadEnv();
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { connectRime } from './rime.mjs';
+import { transcribePcm, sttAvailable, sttConfig } from './stt.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 const TOKEN = process.env.PROXY_TOKEN || '';
@@ -22,6 +23,7 @@ const CFG = () => ({
   audioFormat: process.env.RIME_AUDIO_FORMAT || 'pcm',
   endpoint: process.env.RIME_WS_URL || 'wss://users-ws.rime.ai/ws3',
   transport: 'websocket-via-backend-proxy',
+  stt: sttAvailable() ? 'backend-whisper' : 'browser-webspeech',
   // Connection-level, and only effective as query params - see backend/rime.mjs.
   segment: process.env.RIME_SEGMENT || 'never',
   pauseBetweenBrackets: true,
@@ -30,9 +32,40 @@ const CFG = () => ({
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  // The extension page is a chrome-extension:// origin, so /stt is cross-origin.
+  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Headers', 'content-type, x-vf-rate, x-vf-token');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
+
   res.setHeader('Content-Type', 'application/json');
   if (url.pathname === '/health') return res.end(JSON.stringify({ ok: true, keyLoaded: !!process.env.RIME_API_KEY }));
   if (url.pathname === '/provider') return res.end(JSON.stringify(CFG()));
+
+  // POST /stt - raw 16-bit PCM mono in the body, transcript out.
+  if (url.pathname === '/stt') {
+    if (req.method !== 'POST') { res.statusCode = 405; return res.end(JSON.stringify({ error: 'POST only' })); }
+    if (TOKEN && req.headers['x-vf-token'] !== TOKEN && url.searchParams.get('token') !== TOKEN) {
+      res.statusCode = 401; return res.end(JSON.stringify({ error: 'unauthorized' }));
+    }
+    const rate = Number(req.headers['x-vf-rate'] || url.searchParams.get('rate') || sttConfig().rate);
+    const chunks = [];
+    let size = 0;
+    req.on('data', (d) => {
+      size += d.length;
+      // A runaway upload must not become a memory problem: 60s at 16kHz mono.
+      if (size > 16000 * 2 * 60) { req.destroy(); return; }
+      chunks.push(d);
+    });
+    req.on('end', async () => {
+      const r = await transcribePcm(Buffer.concat(chunks), { rate });
+      res.statusCode = r.ok ? 200 : 503;
+      res.end(JSON.stringify(r));
+    });
+    req.on('error', () => { res.statusCode = 400; res.end(JSON.stringify({ error: 'read failed' })); });
+    return;
+  }
+
   res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
 });
 

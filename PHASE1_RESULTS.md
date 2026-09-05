@@ -20,64 +20,64 @@ Provider in force: `mistv2` / `abbie` / `pcm` / `segment=never`
 
  1. `[text]` **Text input** _(via label-wrap)_
     - spoke: Field 1 of 11. What's your text input?
-    - audio: 55 chunks, 1.74s
+    - audio: 53 chunks, 1.76s
  2. `[password]` **Password** _(via label-wrap)_
     - spoke: Field 2 of 11. What's your password? <300> You may prefer to type this one.
-    - audio: 88 chunks, 3.48s
+    - audio: 98 chunks, 3.24s
  3. `[textarea]` **Textarea** _(via label-wrap)_
     - spoke: Field 3 of 11. Textarea. <300> What would you like to say?
-    - audio: 68 chunks, 2.93s
+    - audio: 104 chunks, 3.2s
  4. `[select]` **Dropdown (select)** _(via label-wrap)_
     - spoke: Field 4 of 11. Dropdown (select). <300> Choose one: <300> One, <400> Two, <400> Three.
-    - audio: 131 chunks, 4.82s
+    - audio: 81 chunks, 4.6s
  5. `[text]` **Dropdown (datalist)** _(via label-wrap)_
     - spoke: Field 5 of 11. What's your dropdown (datalist)?
-    - audio: 63 chunks, 1.95s
+    - audio: 59 chunks, 2.03s
 
 **httpbin pizza order** — 7 fields found
 
  1. `[text]` **Customer name** _(via label-wrap)_
     - spoke: Field 1 of 7. What's your customer name?
-    - audio: 51 chunks, 1.67s
+    - audio: 54 chunks, 1.71s
  2. `[tel]` **Telephone** _(via label-wrap)_
     - spoke: Field 2 of 7. What's your telephone?
-    - audio: 61 chunks, 1.92s
+    - audio: 48 chunks, 1.51s
  3. `[email]` **E-mail address** _(via label-wrap)_
     - spoke: Field 3 of 7. What's your email address?
-    - audio: 58 chunks, 1.78s
+    - audio: 63 chunks, 1.8s
  4. `[radiogroup]` **Pizza Size** _(via fieldset-legend)_
     - spoke: Field 4 of 7. Pizza Size. <300> Choose one: <300> Small, <400> Medium, <400> Large.
-    - audio: 168 chunks, 5.18s
+    - audio: 134 chunks, 4.98s
  5. `[checkboxgroup]` **Pizza Toppings** _(via fieldset-legend)_
     - spoke: Field 5 of 7. Pizza Toppings. <300> Which of these apply? <300> Bacon, <400> Extra Cheese, <400> Onion, <400> Mushroom. <300> Say the ones you want.
-    - audio: 207 chunks, 6.76s
+    - audio: 225 chunks, 6.79s
 
 **demoqa practice form** — 11 fields found
 
  1. `[text]` **First Name** _(via placeholder)_
     - spoke: Field 1 of 11. What's your first Name?
-    - audio: 63 chunks, 1.86s
+    - audio: 35 chunks, 1.64s
  2. `[text]` **Last Name** _(via placeholder)_
     - spoke: Field 2 of 11. What's your last Name?
-    - audio: 65 chunks, 1.95s
+    - audio: 49 chunks, 1.59s
  3. `[text]` **user Email** _(via name-attr)_
     - spoke: Field 3 of 11. What's your email address?
-    - audio: 60 chunks, 1.87s
+    - audio: 52 chunks, 1.96s
  4. `[radiogroup]` **Gender** _(via preceding-text)_
     - spoke: Field 4 of 11. Gender. <300> Choose one: <300> Male, <400> Female, <400> Other.
-    - audio: 81 chunks, 4.67s
+    - audio: 132 chunks, 4.77s
  5. `[text]` **Mobile Number** _(via placeholder)_
     - spoke: Field 5 of 11. What's your mobile Number?
-    - audio: 54 chunks, 1.76s
+    - audio: 50 chunks, 1.94s
 
 **GitHub login (strict CSP)** — 2 fields found
 
  1. `[text]` **Username or email address** _(via label-for)_
     - spoke: Field 1 of 2. What's your email address?
-    - audio: 67 chunks, 2.04s
+    - audio: 62 chunks, 2.14s
  2. `[password]` **Password** _(via label-for)_
     - spoke: Field 2 of 2. What's your password? <300> You may prefer to type this one.
-    - audio: 114 chunks, 3.56s
+    - audio: 77 chunks, 2.74s
 
 
 ## Reproducing

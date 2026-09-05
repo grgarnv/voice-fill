@@ -26,6 +26,8 @@
       "js": [
         "shared/fieldgraph.js",
         "shared/prompts.js",
+        "shared/normalize.js",
+        "shared/domwrite.js",
         "content/content.js"
       ],
       "run_at": "document_idle",
@@ -39,7 +41,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "assets/test.mp3"
+        "assets/test.mp3",
+        "offscreen/recorder-worklet.js"
       ],
       "matches": [
         "<all_urls>"

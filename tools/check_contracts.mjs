@@ -85,6 +85,17 @@ if (/chrome\.tabs/.test(offCode)) {
 if (!/contextId/.test(offCode)) errs.push('offscreen never sets a contextId - stale-chunk dropping cannot work');
 if (!/operation:\s*'flush'/.test(offCode)) errs.push("offscreen never flushes - under segment=never nothing is ever synthesised");
 
+// A message literal with two `type:` keys: the second silently wins, the
+// message type becomes something like 'text', and no handler ever matches.
+// This shipped once, in the VF_WRITE_FIELD relay, and cost a debugging cycle.
+for (const [file, src] of [['background', bg], ['offscreen', off], ['content', con], ['popup', pop]]) {
+  const literals = src.match(/\{[^{}]*\btype:\s*'[A-Z_]+'[^{}]*\}/g) || [];
+  for (const lit of literals) {
+    const n = (lit.match(/\btype:/g) || []).length;
+    if (n > 1) errs.push(`${file}: message literal has ${n} 'type:' keys - the later one overwrites the message type: ${lit.replace(/\s+/g, ' ').slice(0, 90)}`);
+  }
+}
+
 // Offscreen lifecycle guards
 if (!/getContexts/.test(bg)) errs.push('no getContexts guard - createDocument throws if the document already exists');
 if (!/creating/.test(bg)) notes.push('concurrent createDocument calls are collapsed via a shared promise');

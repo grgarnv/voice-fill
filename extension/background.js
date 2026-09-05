@@ -36,8 +36,10 @@ async function ensureOffscreen() {
   if (creating) { await creating; return 'existing'; }   // collapse concurrent callers
   creating = chrome.offscreen.createDocument({
     url: OFFSCREEN_PATH,
-    reasons: ['AUDIO_PLAYBACK'],
-    justification: 'Play Rime TTS audio independently of the page CSP, and keep the session alive during playback.',
+    // AUDIO_PLAYBACK keeps the document alive while Rime audio plays;
+    // USER_MEDIA is what permits it to hold the microphone for push-to-talk.
+    reasons: ['AUDIO_PLAYBACK', 'USER_MEDIA'],
+    justification: 'Play Rime TTS audio independently of the page CSP, capture push-to-talk speech, and keep the session alive for the length of a form.',
   });
   try { await creating; return 'created'; }
   finally { creating = null; }
@@ -119,6 +121,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(await toOffscreen({ type: 'OFF_CONNECT', backend: await backendConfig(), warm: msg.warm !== false }));
           break;
 
+        case 'VF_LISTEN_START': sendResponse(await toOffscreen({ type: 'OFF_LISTEN_START' })); break;
+        case 'VF_LISTEN_STOP':  sendResponse(await toOffscreen({ type: 'OFF_LISTEN_STOP' })); break;
+        case 'VF_TRANSCRIPT':   sendResponse(await toOffscreen({ type: 'OFF_TRANSCRIPT', text: msg.text })); break;
+        case 'VF_SET_STT':      sendResponse(await toOffscreen({ type: 'OFF_SET_STT', provider: msg.provider })); break;
+
         case 'VF_NEXT':    sendResponse(await toOffscreen({ type: 'OFF_NEXT' })); break;
         case 'VF_PREV':    sendResponse(await toOffscreen({ type: 'OFF_PREV' })); break;
         case 'VF_REPEAT':  sendResponse(await toOffscreen({ type: 'OFF_REPEAT' })); break;
@@ -137,6 +144,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const tabId = msg.tabId ?? activeTabId;
           if (!tabId) { sendResponse({ ok: false, error: 'no active tab' }); break; }
           try { sendResponse(await toContent(tabId, { type: 'VF_FOCUS_FIELD', fieldId: msg.fieldId })); }
+          catch (e) { sendResponse({ ok: false, error: String(e?.message || e) }); }
+          break;
+        }
+
+        // Offscreen -> page: write a value, read one back. Offscreen has no
+        // chrome.tabs access, so every DOM touch is routed through here.
+        case 'VF_WRITE_FIELD': {
+          const tabId = msg.tabId ?? activeTabId;
+          if (!tabId) { sendResponse({ ok: false, error: 'no active tab' }); break; }
+          try {
+            // `fieldType`, never `type`: a second `type:` key in this literal
+            // silently overwrote the message type with the FIELD type, so the
+            // content script received { type: 'text' } and matched nothing.
+            sendResponse(await toContent(tabId, {
+              type: 'VF_WRITE_FIELD', fieldId: msg.fieldId, fieldType: msg.fieldType, value: msg.value,
+            }));
+          } catch (e) { sendResponse({ ok: false, error: String(e?.message || e) }); }
+          break;
+        }
+
+        case 'VF_READ_FIELD': {
+          const tabId = msg.tabId ?? activeTabId;
+          if (!tabId) { sendResponse({ ok: false, error: 'no active tab' }); break; }
+          try { sendResponse(await toContent(tabId, { type: 'VF_READ_FIELD', fieldId: msg.fieldId })); }
           catch (e) { sendResponse({ ok: false, error: String(e?.message || e) }); }
           break;
         }

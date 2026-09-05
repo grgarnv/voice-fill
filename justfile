@@ -59,3 +59,32 @@ test-exit:
 # Everything for Phase 1, in order, writing PHASE1_RESULTS.md
 phase1:
     node tools/phase1.mjs
+
+# --- Phase 2 -----------------------------------------------------------------
+
+# Local STT for the harness. Web Speech returns no transcript in an automated
+# Chrome here (measured), and the PRD sanctions backend STT for the harness.
+stt-install:
+    brew install whisper-cpp
+    mkdir -p .cache/whisper
+    curl -L -o .cache/whisper/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin
+
+# Normalisation + extraction, pure functions. No browser, no network.
+test-normalize:
+    node tools/test_normalize.mjs
+
+# DOM writing against real React. Chrome, network for the React CDN.
+test-domwrite:
+    node tools/test_domwrite.mjs
+
+# The PRD's 20-item read-back round trip: real Rime -> real STT.
+test-readback:
+    node tools/test_readback.mjs
+
+# One full form by voice: real mic path, real STT, real DOM.
+test-voicefill:
+    node tools/test_voicefill.mjs
+
+# Everything for Phase 2, in order, writing PHASE2_RESULTS.md
+phase2:
+    node tools/phase2.mjs

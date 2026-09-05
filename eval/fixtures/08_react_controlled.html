@@ -1,0 +1,99 @@
+<!doctype html><html><head><meta charset="utf-8"><title>React controlled</title></head><body>
+<h1>Genuinely controlled React inputs</h1>
+<!--
+  The point of this fixture is that `el.value = x` CANNOT work here. Every input
+  below is controlled: React owns the value, re-renders from state, and drops an
+  input event whose value matches its internal tracker. A write that only moves
+  the pixels leaves React's state stale - which is worse than failing, because
+  it looks like it worked and the form submits the old value.
+
+  window.__reactState mirrors component state, so a test can assert what REACT
+  believes rather than what the DOM displays.
+-->
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+const e = React.createElement;
+const { useState, useEffect } = React;
+
+function App() {
+  const [name, setName] = useState('');
+  const [pin, setPin] = useState('');
+  const [size, setSize] = useState('');
+  const [contact, setContact] = useState('');
+  const [terms, setTerms] = useState(false);
+  const [diet, setDiet] = useState([]);
+  const [email, setEmail] = useState('');
+
+  // Mirror state outward so the harness can check REACT, not the DOM.
+  useEffect(() => {
+    window.__reactState = { name, pin, size, contact, terms, diet, email };
+  }, [name, pin, size, contact, terms, diet, email]);
+
+  // A field that rejects what it is given: digits only, max 6.
+  const onPin = (ev) => {
+    const v = ev.target.value.replace(/\D/g, '').slice(0, 6);
+    setPin(v);
+  };
+
+  const toggleDiet = (v) => setDiet(d => d.includes(v) ? d.filter(x => x !== v) : [...d, v]);
+
+  const emailBad = email.length > 0 && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(email);
+
+  return e('form', null,
+    e('div', null,
+      e('label', { htmlFor: 'name' }, 'Account holder'),
+      e('input', { id: 'name', name: 'name', value: name, onChange: ev => setName(ev.target.value) })),
+
+    e('div', null,
+      e('label', { htmlFor: 'pin' }, 'PIN code'),
+      e('input', { id: 'pin', name: 'pin', value: pin, onChange: onPin,
+                   inputMode: 'numeric', maxLength: 6 })),
+
+    e('div', null,
+      e('label', { htmlFor: 'email' }, 'Email address'),
+      e('input', { id: 'email', name: 'email', type: 'text', value: email,
+                   'aria-invalid': emailBad ? 'true' : 'false',
+                   'aria-describedby': 'email-err',
+                   onChange: ev => setEmail(ev.target.value) }),
+      e('div', { id: 'email-err', className: 'error',
+                 style: { color: '#b00', display: emailBad ? 'block' : 'none' } },
+        'Enter a valid email address')),
+
+    e('div', null,
+      e('label', { htmlFor: 'size' }, 'Pizza size'),
+      e('select', { id: 'size', name: 'size', value: size, onChange: ev => setSize(ev.target.value) },
+        e('option', { value: '' }, 'Please choose'),
+        e('option', { value: 'sm' }, 'Small'),
+        e('option', { value: 'md' }, 'Medium'),
+        e('option', { value: 'lg' }, 'Large'))),
+
+    e('fieldset', null,
+      e('legend', null, 'Preferred contact method'),
+      ['email', 'phone', 'post'].map(v =>
+        e('label', { key: v },
+          e('input', { type: 'radio', name: 'contact', value: v,
+                       checked: contact === v, onChange: () => setContact(v) }),
+          ' ', v[0].toUpperCase() + v.slice(1)))),
+
+    e('fieldset', null,
+      e('legend', null, 'Dietary requirements'),
+      [['v', 'Vegetarian'], ['ve', 'Vegan'], ['gf', 'Gluten free']].map(([v, label]) =>
+        e('label', { key: v },
+          e('input', { type: 'checkbox', name: 'diet', value: v,
+                       checked: diet.includes(v), onChange: () => toggleDiet(v) }),
+          ' ', label))),
+
+    e('div', null,
+      e('label', null,
+        e('input', { type: 'checkbox', name: 'terms', checked: terms,
+                     onChange: ev => setTerms(ev.target.checked) }),
+        ' I accept the terms and conditions'))
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+window.__reactReady = true;
+</script>
+</body></html>

@@ -32,6 +32,7 @@ function paintSession(s) {
   $('next').disabled = !running;
   $('repeat').disabled = !running;
   $('stop').disabled = !running;
+  $('ptt').disabled = !running;
   $('start').textContent = running ? 'Restart' : 'Start';
 
   if (!running) {
@@ -40,8 +41,13 @@ function paintSession(s) {
     $('meta').textContent = s?.lastError ? s.lastError.slice(0, 60) : '';
     return;
   }
-  $('pos').textContent = `Field ${s.index + 1} of ${s.total}`;
-  $('lab').textContent = s.field?.label || '(unlabelled field)';
+  $('pos').textContent = s.pending
+    ? `Confirming field ${s.index + 1} of ${s.total}`
+    : `Field ${s.index + 1} of ${s.total}`;
+  $('lab').textContent = s.pending
+    ? `Is "${s.pending.display}" correct?`
+    : (s.field?.label || '(unlabelled field)');
+  if (s.lastTranscript && !pttHeld) $('heard').textContent = `heard: ${s.lastTranscript}`;
   const bits = [s.field?.type];
   if (s.field?.required) bits.push('required');
   if (s.field?.optionCount) bits.push(`${s.field.optionCount} options`);
@@ -104,6 +110,44 @@ $('start').addEventListener('click', async () => {
   if (r.fieldCount === 0) { $('pos').textContent = 'no fields'; $('lab').textContent = 'No fillable fields found on this page'; return; }
   await refreshState();
 });
+
+/* ------------------------------------------------------- push-to-talk ---- */
+//
+// Press and hold. The mic opens on pointerdown and closes on pointerup, so it
+// is shut whenever Rime is speaking - the echo problem Phase 0 flagged as the
+// top open risk simply does not arise in this mode.
+//
+// pointerup is bound on the WINDOW, not the button: releasing the mouse
+// outside the button must still end the turn, or the mic stays open.
+let pttHeld = false;
+
+async function pttDown(e) {
+  e?.preventDefault();
+  if (pttHeld || $('ptt').disabled) return;
+  pttHeld = true;
+  $('ptt').classList.add('live');
+  $('ptt').textContent = 'Listening — release to send';
+  $('heard').textContent = '';
+  await send({ type: 'VF_LISTEN_START' });
+}
+
+async function pttUp() {
+  if (!pttHeld) return;
+  pttHeld = false;
+  $('ptt').classList.remove('live');
+  $('ptt').textContent = 'Transcribing…';
+  const r = await send({ type: 'VF_LISTEN_STOP' });
+  $('ptt').textContent = 'Hold to speak';
+  if (r?.transcript) $('heard').textContent = `heard: ${r.transcript}`;
+  else if (r?.error) $('heard').textContent = r.error.slice(0, 60);
+  await refreshState();
+}
+
+$('ptt').addEventListener('pointerdown', pttDown);
+window.addEventListener('pointerup', pttUp);
+// Holding the spacebar is easier than aiming at a button when you cannot see it.
+window.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat) pttDown(e); });
+window.addEventListener('keyup', (e) => { if (e.code === 'Space') pttUp(); });
 
 $('next').addEventListener('click',   async () => { await send({ type: 'VF_NEXT' });   await refreshState(); });
 $('prev').addEventListener('click',   async () => { await send({ type: 'VF_PREV' });   await refreshState(); });

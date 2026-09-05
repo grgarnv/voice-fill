@@ -1,0 +1,68 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Validation</title></head><body>
+<h1>Fields that reject what they are given</h1>
+
+<!-- An error belonging to nothing near the fields below. It must NOT be
+     attributed to them: reading a page's cookie-banner text back as "that
+     value was not accepted" is worse than saying nothing. -->
+<div class="error" style="color:#b00">Unrelated page-level error notice</div>
+<input id="lonely" name="lonely" aria-label="A field with no error of its own">
+
+<form>
+  <!-- constraint validation: pattern -->
+  <label for="postcode">Postcode</label>
+  <input id="postcode" name="postcode" pattern="[A-Za-z]{1,2}\d[A-Za-z\d]?\d[A-Za-z]{2}"
+         title="Enter a UK postcode like SW1A2AA">
+
+  <!-- constraint validation: range -->
+  <label for="age">Age</label>
+  <input id="age" name="age" type="number" min="18" max="120">
+
+  <!-- constraint validation: required + type -->
+  <label for="mail">Email</label>
+  <input id="mail" name="mail" type="email">
+
+  <!-- a masked widget that ignores value assignment and only accepts keys -->
+  <label for="masked">Masked reference</label>
+  <input id="masked" name="masked">
+
+  <!-- a field whose error appears as a sibling node after a bad value -->
+  <div class="field">
+    <label for="coupon">Coupon code</label>
+    <input id="coupon" name="coupon">
+    <div class="invalid-feedback" id="coupon-err" style="display:none;color:#b00">
+      That coupon code is not recognised
+    </div>
+  </div>
+</form>
+
+<script>
+  // The masked input drops any programmatic assignment on the floor and only
+  // accepts characters that arrive as real keystrokes. This is the react-input-
+  // mask / cleave.js shape, and it is why the writer has a typing fallback.
+  (() => {
+    const el = document.getElementById('masked');
+    let real = '';
+    const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    Object.defineProperty(el, 'value', {
+      configurable: true,
+      get() { return real; },
+      set(v) { /* assignment ignored unless it came from a keystroke */ },
+    });
+    el.addEventListener('keydown', (e) => {
+      if (e.key && e.key.length === 1) {
+        real += e.key;
+        proto.set.call(el, real);
+        Object.defineProperty(el, 'value', {
+          configurable: true, get() { return real; }, set(v) {},
+        });
+      }
+    });
+  })();
+
+  // The coupon field validates on change and reveals a sibling error node.
+  document.getElementById('coupon').addEventListener('change', (e) => {
+    const bad = e.target.value && e.target.value !== 'GOOD2026';
+    document.getElementById('coupon-err').style.display = bad ? 'block' : 'none';
+  });
+</script>
+</body></html>
