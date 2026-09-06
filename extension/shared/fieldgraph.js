@@ -8,7 +8,8 @@
 globalThis.VFFieldGraph = (() => {
   'use strict';
 
-  const FIELD_SELECTOR = 'input,select,textarea,[contenteditable=""],[contenteditable="true"],[role=combobox],[role=radiogroup]';
+  const FIELD_SELECTOR = 'input,select,textarea,[contenteditable=""],[contenteditable="true"],'
+    + '[role=combobox],[role=radiogroup],[role=listbox],[role=checkbox],[role=switch],[role=group]';
 
   // Buttons are controls, not answerable fields. `hidden` never reaches a user.
   const SKIP_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);
@@ -28,7 +29,10 @@ globalThis.VFFieldGraph = (() => {
     const role = (el.getAttribute && el.getAttribute('role') || '').toLowerCase().trim();
     if (role && WIDGET_ROLES.has(role)) return true;
     const hp = el.getAttribute && el.getAttribute('aria-haspopup');
-    if (hp && hp !== 'false') return true;   // a disclosure toggle, not a question
+    // `aria-haspopup=listbox` is how ARIA 1.2 spells a custom select. On a
+    // combobox or listbox it is the field's own definition, not a disclosure
+    // toggle, so the haspopup rule must not reach it (F4.7).
+    if (hp && hp !== 'false' && role !== 'combobox' && role !== 'listbox') return true;
     return false;
   }
 
@@ -375,7 +379,9 @@ globalThis.VFFieldGraph = (() => {
         ['fieldset-legend', () => labelFromFieldset(el)],
         ['role-group', () => labelFromRoleGroup(el)],
         ['group-container-text', () => labelFromGroupContainerText(groupContainer(el))],
-        ['preceding-text', () => { const c = groupContainer(el); return c ? labelFromPrecedingText(c) : null; }],
+        ['aria-label', () => labelFromAriaLabel(el)],
+        ['aria-labelledby', () => labelFromAriaLabelledBy(el)],
+        ['preceding-text', () => labelFromPrecedingText(groupContainer(el) || el)],
         ['name-attr', () => humanisedName(el)],
       ];
       for (const [source, fn] of groupChain) {
@@ -407,10 +413,52 @@ globalThis.VFFieldGraph = (() => {
 
   /* ------------------------------------------------------------- field type -- */
 
+  /**
+   * Custom controls (PRD F4.7). A widget built out of divs is a real field when
+   * it carries the ARIA that makes it operable, and the FieldGraph names it by
+   * the same rules as a native one. The types are prefixed `aria-` so the
+   * writer dispatches to the click-and-verify path rather than to `.value =`.
+   *
+   * A native <input type=checkbox role=checkbox> is NOT one of these: the tag
+   * wins, because the real control is right there and clicking it works.
+   */
+  const NATIVE_TAG = /^(INPUT|SELECT|TEXTAREA)$/;
+
+  /** Is this listbox the popup a combobox owns? Then it is not a field of its own. */
+  function isOwnedPopup(el) {
+    if ((el.getAttribute('role') || '').toLowerCase() !== 'listbox') return false;
+    if (el.closest('[role=combobox]')) return true;
+    if (!el.id) return false;
+    try {
+      const doc = el.ownerDocument;
+      const esc = (doc.defaultView && doc.defaultView.CSS && doc.defaultView.CSS.escape)
+        ? doc.defaultView.CSS.escape(el.id) : el.id.replace(/["\\]/g, '\\$&');
+      return !!doc.querySelector(`[role=combobox][aria-controls~="${esc}"],[role=combobox][aria-owns~="${esc}"]`);
+    } catch { return false; }
+  }
+
+  function ariaType(el) {
+    const role = (el.getAttribute && el.getAttribute('role') || '').toLowerCase().trim();
+    if (!role) return null;
+    if (/^(input|select|textarea)$/i.test(el.tagName)) return null;
+    switch (role) {
+      case 'combobox': return 'combobox';
+      case 'listbox': return el.getAttribute('aria-multiselectable') === 'true' ? 'aria-checkboxgroup' : 'aria-radiogroup';
+      case 'radiogroup': return 'aria-radiogroup';
+      case 'checkbox': case 'switch': return 'aria-checkbox';
+      // A [role=group] is only a field when it is actually a set of choices.
+      case 'group': return el.querySelector('[role=checkbox]') ? 'aria-checkboxgroup'
+        : (el.querySelector('[role=radio]') ? 'aria-radiogroup' : null);
+      default: return null;
+    }
+  }
+
   function fieldType(el) {
     const tag = el.tagName.toLowerCase();
     if (tag === 'select') return el.multiple ? 'select-multiple' : 'select';
     if (tag === 'textarea') return 'textarea';
+    const aria = ariaType(el);
+    if (aria) return aria;
     if (el.getAttribute && el.getAttribute('role') === 'radiogroup') return 'radiogroup';
     if (el.getAttribute && el.getAttribute('role') === 'combobox') return 'combobox';
     if (el.isContentEditable) return 'contenteditable';
@@ -427,7 +475,55 @@ globalThis.VFFieldGraph = (() => {
     return PLACEHOLDER_OPTION.test(clean(o.textContent));
   }
 
+  const ariaText = (el) => {
+    const own = el.getAttribute('aria-label');
+    if (own) return clean(own);
+    const ids = (el.getAttribute('aria-labelledby') || '').trim();
+    if (ids) {
+      const doc = el.ownerDocument;
+      const t = ids.split(/\s+/).map(id => (doc.getElementById(id) || {}).textContent || '').join(' ');
+      if (clean(t)) return clean(t);
+    }
+    return clean(el.textContent);
+  };
+
+  /**
+   * The choices a custom control offers (F4.7).
+   *
+   * A listbox that is CLOSED has no options in the DOM to read, and inventing
+   * them is exactly the guess this product must not make. An empty list is
+   * returned instead; the prompt then asks the question without reading choices
+   * aloud, and the writer opens the control and matches against what is really
+   * there. Nothing downstream is ever handed an option the page did not show.
+   */
+  function ariaOptionsOf(el) {
+    const doc = el.ownerDocument;
+    const roles = '[role=radio],[role=option],[role=checkbox]';
+    let nodes = Array.from(el.querySelectorAll(roles));
+    if (!nodes.length) {
+      const id = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+      const box = id ? doc.getElementById(id.split(/\s+/)[0]) : null;
+      if (box) nodes = Array.from(box.querySelectorAll(roles));
+    }
+    const out = [];
+    const seen = new Set();
+    for (const n of nodes) {
+      if (n.getAttribute('aria-disabled') === 'true') continue;
+      const text = ariaText(n);
+      if (!text) continue;
+      const value = n.getAttribute('data-value') || n.getAttribute('value') || text;
+      const k = `${value}\u0000${text}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ value, text });
+    }
+    return out;
+  }
+
   function optionsOf(el, type) {
+    if (type === 'combobox' || type === 'aria-radiogroup' || type === 'aria-checkboxgroup') {
+      return ariaOptionsOf(el);
+    }
     if (type === 'select' || type === 'select-multiple') {
       return Array.from(el.options || [])
         .filter(o => !o.disabled)
@@ -445,6 +541,69 @@ globalThis.VFFieldGraph = (() => {
     return [];
   }
 
+  /* -------------------------------------------- dependent fields (F4.1) --- */
+
+  // The cascade every address form has, in the order the answers narrow it.
+  // Matched over the label AND the name/id, because half of these forms label
+  // the field "Region" and name it `state`.
+  const CASCADE = [
+    ['country', /\b(country|nation|countrycode)\b/i],
+    ['state',   /\b(state|province|county|region|prefecture|territory)\b/i],
+    ['city',    /\b(city|town|suburb|locality|district)\b/i],
+  ];
+
+  function cascadeRung(field, el) {
+    const hay = `${field.label || ''} ${(el.getAttribute && (el.getAttribute('name') || el.id)) || ''}`;
+    for (let i = 0; i < CASCADE.length; i++) if (CASCADE[i][1].test(hay)) return i;
+    return -1;
+  }
+
+  /**
+   * Which earlier field does this one's content depend on? (PRD F4.1)
+   *
+   * Two signals, both of them the page's own statement, never a guess:
+   *
+   *   1. An explicit `data-depends-on` naming an earlier field. Exact.
+   *   2. The country -> state -> city cascade, matched on label and name, and
+   *      only when the earlier field really is earlier.
+   *
+   * A dependency is a claim that this field's OPTIONS are a function of that
+   * answer. It is used for two things and nothing else: refreshing the option
+   * list when the parent changes, and dropping a selection the new list no
+   * longer contains. It never reorders the form and never skips a field.
+   */
+  function resolveDependencies(records, els) {
+    const byName = new Map();
+    records.forEach((f, i) => {
+      const el = Array.isArray(els[i]) ? els[i][0] : els[i];
+      const n = (el.getAttribute && (el.getAttribute('name') || el.id)) || '';
+      if (n && !byName.has(n)) byName.set(n, f.id);
+    });
+
+    records.forEach((f, i) => {
+      const el = Array.isArray(els[i]) ? els[i][0] : els[i];
+      const explicit = el.getAttribute && (el.getAttribute('data-depends-on') || el.getAttribute('data-parent-field'));
+      if (explicit && byName.has(explicit)) {
+        const parent = byName.get(explicit);
+        const pi = records.findIndex(r => r.id === parent);
+        if (pi >= 0 && pi < i) { f.dependsOn = parent; f.dependsSource = 'data-attr'; return; }
+      }
+      const rung = cascadeRung(f, el);
+      if (rung <= 0) return;                         // country depends on nothing
+      // The nearest EARLIER field one rung up. Skipping straight to country
+      // when there is a state field between them would refresh the wrong list.
+      for (let j = i - 1; j >= 0; j--) {
+        const pel = Array.isArray(els[j]) ? els[j][0] : els[j];
+        if (cascadeRung(records[j], pel) === rung - 1) {
+          f.dependsOn = records[j].id;
+          f.dependsSource = 'cascade';
+          return;
+        }
+      }
+    });
+    return records;
+  }
+
   /* ------------------------------------------------------------- ordering --- */
 
   /**
@@ -460,6 +619,29 @@ globalThis.VFFieldGraph = (() => {
   }
 
   /* --------------------------------------------------------------- scan ----- */
+
+  const CHOICE_TYPES = new Set(['select', 'select-multiple', 'combobox', 'aria-radiogroup', 'aria-checkboxgroup', 'radiogroup', 'checkboxgroup']);
+  const MASKABLE = new Set(['text', 'tel', 'number', 'search', 'date', 'month', 'week', 'datetime-local', 'time']);
+
+  /** The format the page advertises, if it advertises one. Read-only here. */
+  function maskHint(el) {
+    const D = globalThis.VFDomWrite;
+    if (!D || !D.maskOf) return null;
+    try { return D.maskOf(el); } catch { return null; }
+  }
+
+  /**
+   * What "the form changed" means (PRD F4.9).
+   *
+   * The field ids alone were not enough: a dependent <select> being populated
+   * with 51 states does not change any id, so the session went on holding an
+   * empty option list and read out a question with no answers. Options, labels,
+   * types and requiredness are all part of the shape a session is filling.
+   */
+  function signatureOf(records) {
+    return records.map(f =>
+      `${f.id}~${f.type}~${f.optionCount}~${f.required ? 1 : 0}~${(f.label || '').slice(0, 40)}`).join('|');
+  }
 
   function stableKey(el, label, type, seenCounts) {
     const name = (el.getAttribute && (el.getAttribute('name') || el.getAttribute('id'))) || '';
@@ -499,6 +681,19 @@ globalThis.VFFieldGraph = (() => {
       const type = fieldType(el);
 
       if (el.tagName.toLowerCase() === 'input' && SKIP_INPUT_TYPES.has(type)) { skipped.button++; continue; }
+      // A [role=group] that holds no choices, or any other element matched only
+      // by its role and not resolved to a field type, is page structure. Without
+      // this it enters the graph as a field of type "div" and the user is asked
+      // a question about a layout container.
+      if (!NATIVE_TAG.test(el.tagName) && !el.isContentEditable && !ariaType(el)) { skipped.widget++; continue; }
+      // A combobox's own listbox is the SAME question as the combobox. Scanning
+      // both asks it twice, and the second one cannot be written.
+      if ((type === 'aria-radiogroup' || type === 'aria-checkboxgroup') && isOwnedPopup(el)) { skipped.dup++; continue; }
+      // A [role=checkbox] inside a custom group is an OPTION of that group's
+      // question, not a question of its own - the same collapse native radios
+      // get. Without this a five-option custom group is read as five yes/no
+      // fields.
+      if (type === 'aria-checkbox' && el.closest('[role=group],[role=listbox],[role=radiogroup]')) { skipped.dup++; continue; }
       if (isWidgetNotField(el)) { skipped.widget++; continue; }
       const blocked = isUnanswerable(el);
       if (blocked) { skipped[blocked]++; continue; }
@@ -548,9 +743,10 @@ globalThis.VFFieldGraph = (() => {
         continue;
       }
 
-      const { label, source } = resolveLabel(el);
+      const isAriaGroup = type === 'aria-radiogroup' || type === 'aria-checkboxgroup' || type === 'combobox';
+      const { label, source } = resolveLabel(el, { isGroup: isAriaGroup });
       fields.push({
-        type, name: el.name || '', el, els: [el],
+        type, name: el.name || el.getAttribute('name') || el.id || '', el, els: [el],
         label, labelSource: source,
         options: optionsOf(el, type),
         domIndex: domIndex.get(el),
@@ -578,13 +774,21 @@ globalThis.VFFieldGraph = (() => {
         required,
         options: f.options,
         visible: true,
-        dependsOn: null,          // populated on dynamic rescan (F4.1 does the real work)
+        dependsOn: null,          // filled in by resolveDependencies below (F4.1)
+        dependsSource: null,
+        // A choice field with nothing to choose from yet: the page has not
+        // populated it, which for a dependent field means its parent is
+        // unanswered. Asking it now would offer the user no options at all.
+        awaitingParent: CHOICE_TYPES.has(f.type) && f.options.length === 0,
+        mask: MASKABLE.has(f.type) ? maskHint(f.el) : null,
         optionCount: f.options.length,
       });
       outEls.push(f.els.length > 1 ? f.els : f.el);
     });
 
-    return { fields: out, elements: outEls, skipped, scannedAt: Date.now() };
+    resolveDependencies(out, outEls);
+
+    return { fields: out, elements: outEls, skipped, scannedAt: Date.now(), signature: signatureOf(out) };
   }
 
   /** The visible text for one radio/checkbox option. */
@@ -609,5 +813,7 @@ globalThis.VFFieldGraph = (() => {
   return {
     scan, resolveLabel, isVisible, normalizeLabel, fieldType,
     deepQueryAll, FIELD_SELECTOR, looksLikeExampleValue, isWidgetNotField, isUnanswerable,
+    // F4
+    ariaType, ariaOptionsOf, isOwnedPopup, resolveDependencies, signatureOf, cascadeRung, CASCADE,
   };
 })();

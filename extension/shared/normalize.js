@@ -521,9 +521,88 @@ globalThis.VFNormalize = (() => {
    * is now identified and REMOVED before the day is read, so the two numbers
    * can never merge.
    */
-  function parseDate(text) {
+  /* ------------------------------------------------- relative dates (F4.4) */
+
+  const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const addDays = (d, n) => { const c = new Date(d.getTime()); c.setDate(c.getDate() + n); return c; };
+
+  /**
+   * "today", "tomorrow", "next Friday", "in three weeks" -> ISO.
+   *
+   * Anchored on a caller-supplied `today` so the tests are not a clock race.
+   * Deliberately narrow: only phrases with exactly one reading. "Friday" on its
+   * own is not here - it could be either side of today, and a wrong date of
+   * birth or appointment is expensive. It falls through and the session asks.
+   */
+  function parseRelativeDate(text, today = new Date()) {
+    const t = deOrdinal(String(text ?? '').toLowerCase().replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim());
+    if (!t) return null;
+    // A hedge is the user saying they have not picked a day. "Sometime next
+    // week" resolved to a specific Sunday is a wrong appointment date that
+    // reads back as if it were what they said.
+    if (/\b(sometime|some time|somewhere|around|about|roughly|maybe|perhaps|probably|ish|or so|early|late|mid)\b/.test(t)) return null;
+    const base = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+    if (/\bday after tomorrow\b/.test(t)) return isoOf(addDays(base, 2));
+    if (/\bday before yesterday\b/.test(t)) return isoOf(addDays(base, -2));
+    // "in three days", "two weeks from now", "in a month"
+    const rel = /\b(?:in|after)\s+([a-z0-9 ]+?)\s+(day|days|week|weeks|month|months|year|years)\b/.exec(t)
+      || /\b([a-z0-9 ]+?)\s+(day|days|week|weeks|month|months|year|years)\s+from\s+(?:now|today)\b/.exec(t);
+    if (rel) {
+      const n = /^\d+$/.test(rel[1].trim()) ? Number(rel[1].trim())
+        : (/^an?$/.test(rel[1].trim()) ? 1 : wordsToNumber(rel[1]));
+      if (Number.isFinite(n) && n !== null && n >= 0 && n <= 400) {
+        const unit = rel[2];
+        if (/^day/.test(unit)) return isoOf(addDays(base, n));
+        if (/^week/.test(unit)) return isoOf(addDays(base, n * 7));
+        const c = new Date(base.getTime());
+        if (/^month/.test(unit)) c.setMonth(c.getMonth() + n); else c.setFullYear(c.getFullYear() + n);
+        return isoOf(c);
+      }
+    }
+
+    // The bare words come AFTER the counted forms: "a week from today" contains
+    // "today", and answering it with today's date is a week wrong.
+    if (/\btoday\b|\bright now\b|\bthis very day\b/.test(t)) return isoOf(base);
+    if (/\btomorrow\b/.test(t)) return isoOf(addDays(base, 1));
+    if (/\byesterday\b/.test(t)) return isoOf(addDays(base, -1));
+
+    // "next Friday" / "last Tuesday" / "this Saturday". A bare weekday is NOT
+    // accepted: which side of today it means is genuinely ambiguous.
+    const wd = /\b(next|last|this|coming)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/.exec(t);
+    if (wd) {
+      const want = WEEKDAYS.indexOf(wd[2]);
+      const dir = wd[1] === 'last' ? -1 : 1;
+      let delta = (want - base.getDay()) * dir;
+      while (delta <= 0) delta += 7;                    // never "today", always the named day
+      return isoOf(addDays(base, delta * dir));
+    }
+    // "next week" names a WEEK, not a day, and turning it into next Sunday is
+    // the guess this product must not make. "a week from today" does name a
+    // day and is handled by the counted branch above.
+    return null;
+  }
+
+  /**
+   * Did the user name a day and a month but no year? That is a different
+   * failure from "I heard nothing date-shaped", and the session asks a
+   * different question, so it is reported rather than guessed at.
+   */
+  function isMonthDayWithoutYear(text) {
+    const t = deOrdinal(String(text ?? '').toLowerCase());
+    if (/\b(19|20)\d{2}\b/.test(t)) return false;
+    if (parseSpokenYear(t) !== null) return false;
+    const hasMonth = MONTHS.some(m => new RegExp(`\\b${m.slice(0, 3)}[a-z]*\\b`).test(t));
+    if (!hasMonth) return false;
+    return /\b\d{1,2}\b/.test(t) || wordsToNumber(t.replace(new RegExp(MONTHS.join('|'), 'g'), ' ')) !== null;
+  }
+
+  function parseDate(text, { today = null } = {}) {
     const t0 = String(text ?? '').toLowerCase().replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
     if (!t0) return null;
+    const relative = parseRelativeDate(t0, today || new Date());
+    if (relative) return relative;
     const t = deOrdinal(t0);
 
     const iso = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t);
@@ -793,7 +872,16 @@ globalThis.VFNormalize = (() => {
       case 'date':
       case 'dob': {
         const d = parseDate(raw);
-        if (!d) return res(null, { confidence: 0, note: 'could not read a date' });
+        if (!d) {
+          // A day and a month with no year is a different failure from hearing
+          // nothing date-shaped: the session asks for the year rather than for
+          // the whole date again, and neither guesses one.
+          return res(null, {
+            confidence: 0,
+            note: isMonthDayWithoutYear(raw) ? 'I heard a day and a month, but no year' : 'could not read a date',
+            needsYear: isMonthDayWithoutYear(raw),
+          });
+        }
         return res(d, { needsConfirmation: true });
       }
 
@@ -826,9 +914,21 @@ globalThis.VFNormalize = (() => {
       case 'multichoice': {
         if (!opts.length) return res(raw);
         if (intent === 'multichoice') {
+          // "all of them" / "none of them" over a group the user has heard in
+          // full. Quantifiers over a TRUNCATED list are refused by the intent
+          // layer's heard ledger, not here; this is the plain reading.
+          if (/^\s*(?:select\s+|check\s+|tick\s+)?(?:all|everything|every one|all of (?:them|those|the above)|the lot)\s*[.!]*$/i.test(raw)) {
+            return res(opts.map(o => o.value), { display: opts.map(o => o.text).join(', '), needsConfirmation: true, note: 'all options' });
+          }
+          if (/^\s*(?:none|nothing|neither|no ne|none of (?:them|those|the above)|not one|skip (?:them |these )?all)\s*[.!]*$/i.test(raw)) {
+            return res([], { display: 'nothing', needsConfirmation: true, note: 'no options' });
+          }
           // Split on connectives before matching, or "bacon and onion" scores
           // as one bad match instead of two good ones.
-          const parts = raw.split(/\b(?:and|also|plus|,)\b/i).map(s => s.trim()).filter(Boolean);
+          // The comma was inert here: `\b,\b` matches nothing, because a comma
+          // has no word boundary on either side. "Insurance, Tracking" was
+          // scored as one long unmatched string and selected nothing.
+          const parts = raw.split(/\s*(?:,|\band\b|\balso\b|\bplus\b)\s*/i).map(s => s.trim()).filter(Boolean);
           const picks = [];
           for (const p of parts) {
             const m = matchOption(p, opts);
@@ -876,7 +976,7 @@ globalThis.VFNormalize = (() => {
     speakNumber, speakYear, speakName, speakAmount, speakTime,
     // speech -> value
     fromSpeech, wordsToDigits, wordsToNumber, deOrdinal, wordsToAlphanumeric, parseYesNo, parseDate,
-    parseTime,
+    parseTime, parseRelativeDate, isMonthDayWithoutYear,
     parseSpokenYear, parseEmail, matchOption, levenshtein, parseCommand,
     // config
     setPauseEnabled, setNamePhonemes, getNamePhonemes, isHighRisk,

@@ -170,6 +170,15 @@ const S = {
   trail: [],
   labels: {},
   lastNav: null,
+  // Phase 4. `rejected` is the values the PAGE has refused, per field: the same
+  // value offered twice is not tried a third time, which is what stops a
+  // validation loop that survives navigating away and back. `stale` records
+  // selections dropped because a dependent list was rebuilt without them, and
+  // `steps` counts the times the form replaced itself under the session.
+  rejected: {},
+  stale: [],
+  steps: 0,
+  invalidSweep: null,
   lastTranscript: null,
   lastStt: null,
 
@@ -764,6 +773,23 @@ async function writeToPage(fieldId, type, value) {
   try { return await chrome.runtime.sendMessage({ type: 'VF_WRITE_FIELD', tabId: S.tabId, fieldId, fieldType: type, value }); }
   catch (e) { return { ok: false, error: String(e?.message || e) }; }
 }
+/** F4.3: ask the page what it is currently complaining about. */
+async function invalidOnPage() {
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'VF_FIND_INVALID', tabId: S.tabId });
+    return Array.isArray(r?.invalid) ? r.invalid : [];
+  } catch { return []; }
+}
+
+/** F4.9: force a rescan and adopt it, for a caller that knows the DOM moved. */
+async function rescanPage() {
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'VF_RESCAN_PAGE', tabId: S.tabId });
+    if (!r?.ok || !Array.isArray(r.fields)) return { ok: false, error: r?.error || 'rescan failed' };
+    return { ok: true, ...updateFields(r.fields) };
+  } catch (e) { return { ok: false, error: String(e?.message || e) }; }
+}
+
 async function readFromPage(fieldId) {
   try { return await chrome.runtime.sendMessage({ type: 'VF_READ_FIELD', tabId: S.tabId, fieldId }); }
   catch (e) { return { ok: false, error: String(e?.message || e) }; }
@@ -1310,12 +1336,25 @@ async function fillAndConfirm(field, intent, ex, transcript) {
 
   if (!w?.ok) return failAttempt(field, w?.error || 'the page would not accept that value', transcript);
 
-  // F2.7: the page gets the last word on whether the value is acceptable.
+  // F2.7 / F4.3: the page gets the last word on whether the value is acceptable.
   if (w.valid === false) {
     S.attempts[field.id] = (S.attempts[field.id] || 0) + 1;
-    const reason = String(w.reason || 'that value was not accepted').replace(/\s+/g, ' ').slice(0, 120);
-    if (S.attempts[field.id] >= MAX_ATTEMPTS) {
-      await speak(`${reason}. ${pauseToken(300)}I'll leave this one for now and come back to it.`, { kind: 'error', fieldId: field.id, why: 'invalid-skip' });
+    const reason = explainRejection(w.reason, field);
+    const seen = (S.rejected[field.id] ||= []);
+    const already = seen.includes(String(ex.value));
+    seen.push(String(ex.value));
+    if (seen.length > 8) seen.shift();
+
+    // A ceiling that survives navigating away and coming back (F4.3). MAX_ATTEMPTS
+    // alone resets on an explicit return, so a user who says "go back to my
+    // postcode" and repeats the same rejected value is in a loop with no end.
+    // The same value refused twice is not offered a third time.
+    if (already || S.attempts[field.id] >= MAX_ATTEMPTS) {
+      await speak(
+        already
+          ? `${reason}. ${pauseToken(300)}That is the same value the page turned down before, so I'll leave this one and come back to it.`
+          : `${reason}. ${pauseToken(300)}I'll leave this one for now and come back to it.`,
+        { kind: 'error', fieldId: field.id, why: 'invalid-skip' });
       return move(+1, 'invalid-skip');
     }
     await speak(`${reason}. ${pauseToken(300)}Let's try again.`, { kind: 'error', fieldId: field.id, why: 'invalid' });
@@ -1323,8 +1362,21 @@ async function fillAndConfirm(field, intent, ex, transcript) {
     return { ok: false, invalid: true, reason, attempts: S.attempts[field.id] };
   }
 
+  // F4.1: changing an answer makes every answer that hangs off it stale, whether
+  // or not the page has rebuilt those lists yet. The membership check below
+  // cannot see this case - a cleared <select> has no options to fail against -
+  // and leaving the old city under a new country reports an answer the form no
+  // longer holds.
+  const changedParent = field.id in S.filled && String(S.filled[field.id]) !== String(ex.value);
   S.filled[field.id] = ex.value;
   S.answered[field.id] = true;
+  if (changedParent) invalidateDependentsOf(field.id);
+
+  // F4.1: the page has repopulated whatever depended on this answer, and the
+  // content script measured the result. Fold it in HERE rather than waiting for
+  // the mutation observer's message, so the very next question is asked against
+  // the option list the page really has, not the empty one it had a moment ago.
+  if (Array.isArray(w.dependents) && w.dependents.length) applyDependents(w.dependents);
 
   const mustConfirm = N.isHighRisk(intent) || ex.needsConfirmation;
   if (!mustConfirm) {
@@ -1346,14 +1398,43 @@ function speakReadback(p, why, text) {
                { kind: 'confirm', fieldId: p.fieldId, why, interrupt: why !== 'confirm' });
 }
 
+/**
+ * A page's rejection, as something a person can act on (PRD F4.3).
+ *
+ * Chrome's own constraint messages are written for a screen ("Please match the
+ * requested format.") and read out loud they tell the user nothing about what
+ * to say next. Where the page supplied its own message, that is used verbatim -
+ * it is the page's explanation and it is usually the better one.
+ */
+function explainRejection(raw, field) {
+  const t = String(raw || '').replace(/\s+/g, ' ').trim();
+  const name = field?.label ? `your ${String(field.label).toLowerCase()}` : 'that';
+  if (!t) return `The page did not accept ${name}`;
+  if (/please match the requested format|match the format/i.test(t)) {
+    return `The page wants ${name} in a particular format`;
+  }
+  if (/fill (in|out) this field|please fill/i.test(t)) return `${field?.label || 'That field'} cannot be left empty`;
+  if (/valid e-?mail/i.test(t)) return 'That is not a complete email address';
+  const hi = /less than or equal to (\S+)/i.exec(t);
+  if (hi) return `That is above the highest value this field takes, ${hi[1].replace(/[.]$/, '')}`;
+  const lo = /greater than or equal to (\S+)/i.exec(t);
+  if (lo) return `That is below the lowest value this field takes, ${lo[1].replace(/[.]$/, '')}`;
+  return t.slice(0, 140);
+}
+
 async function failAttempt(field, note, transcript) {
   S.attempts[field.id] = (S.attempts[field.id] || 0) + 1;
+  // The extraction knows WHY it failed often enough to be worth saying: "no
+  // year" and "I heard nothing" ask different questions of the user.
+  const why = typeof note === 'string' && /no year|day and a month/i.test(note)
+    ? `${note}. ${pauseToken(300)}Which year?`
+    : null;
   if (S.attempts[field.id] >= MAX_ATTEMPTS) {
     await speak(`I'm still not getting that. ${pauseToken(300)}I'll skip this one - you can come back to it.`, { kind: 'error', fieldId: field.id, why: 'failed-skip' });
     return move(+1, 'failed-skip');
   }
-  await speak(`Sorry, I didn't get that.`, { kind: 'error', fieldId: field.id, why: 'failed', interrupt: true });
-  await speakCurrent({ interrupt: false, why: 'failed' });
+  await speak(why || `Sorry, I didn't get that.`, { kind: 'error', fieldId: field.id, why: 'failed', interrupt: true });
+  if (!why) await speakCurrent({ interrupt: false, why: 'failed' });
   return { ok: false, error: note, transcript, attempts: S.attempts[field.id] };
 }
 
@@ -1561,6 +1642,7 @@ async function sessionStart({ fields, tabId, backend, speakSummary = true, profi
   // document so a harness can take deltas across a session restart.
   S.contextsSeen = {};
   S.pending = null; S.attempts = {}; S.filled = {}; S.answered = {}; S.lastTranscript = null; S.lastStt = null;
+  S.rejected = {}; S.stale = []; S.steps = 0; S.invalidSweep = null;
   S.learn = null;
   S.trail = []; S.labels = {}; S.lastNav = null;
   visit(S.index);
@@ -1593,23 +1675,167 @@ async function move(delta, why = 'nav') {
   return { ok: true, index: S.index, prompt: r.prompt, field: r.field };
 }
 
-/** Replace the field list after a DOM mutation without losing the user's place. */
+/**
+ * Replace the field list after a DOM mutation without losing the user's place
+ * (PRD F4.2 / F4.9).
+ *
+ * Three things happen here and nowhere else:
+ *
+ *   the pointer   kept by stable id. If the field the session was on is gone,
+ *                 the page has replaced the form under it - a wizard step - and
+ *                 the pointer goes to the first field of the new shape that has
+ *                 no answer yet, never to whatever happens to sit at the old
+ *                 index.
+ *   the memory    `filled`, `answered`, `labels` and `trail` are NOT cleared.
+ *                 They are the session's logical state; the DOM is only where
+ *                 it is currently displayed. Step 1's answers survive step 2
+ *                 and are still there when the user goes back.
+ *   stale picks   a selection that is no longer among a field's options - a
+ *                 state left over from the previous country - is dropped, and
+ *                 the field becomes unanswered so it is asked again. Leaving it
+ *                 would report an answer the form no longer holds.
+ */
 function updateFields(fields) {
   const prevId = currentField()?.id ?? null;
   const before = S.fields.length;
+  const prevIds = new Set(S.fields.map(f => f.id));
   S.fields = Array.isArray(fields) ? fields : [];
-  if (prevId) {
-    const i = S.fields.findIndex(f => f.id === prevId);
-    S.index = i >= 0 ? i : Math.min(S.index, S.fields.length - 1);
-  } else if (S.fields.length && S.index < 0) {
-    S.index = 0;
+
+  const invalidated = invalidateStaleSelections();
+
+  const keptPointer = !!prevId && S.fields.some(f => f.id === prevId);
+  let stepChanged = false;
+  if (keptPointer) {
+    S.index = S.fields.findIndex(f => f.id === prevId);
+  } else if (S.fields.length) {
+    // The form replaced itself. Where a majority of the fields are new, treat
+    // it as a step: go to the first thing on it the user has not answered.
+    const fresh = S.fields.filter(f => !prevIds.has(f.id)).length;
+    stepChanged = prevId !== null && fresh > 0;
+    if (stepChanged) S.steps++;
+    const firstOpen = S.fields.findIndex(f => !S.answered[f.id]);
+    S.index = firstOpen >= 0 ? firstOpen : 0;
+  } else {
+    S.index = -1;
   }
+
   // A field the page has just shown (a conditional branch, the next step of a
   // wizard) is named for the first time here; one it has taken away keeps the
   // name it had, so "go back to my email" can say where the email went.
   for (const f of S.fields) S.labels[f.id] = f.label || f.id;
   visit(S.index);
-  return { ok: true, before, after: S.fields.length, index: S.index, keptPointer: !!prevId && S.fields.some(f => f.id === prevId) };
+  return {
+    ok: true, before, after: S.fields.length, index: S.index, keptPointer,
+    stepChanged, steps: S.steps, invalidated,
+  };
+}
+
+/**
+ * Everything that hangs off this field, transitively, loses its answer (F4.1).
+ *
+ * The country changed, so the state is stale; the state is stale, so the city
+ * is too - and the city's <select> may already have been emptied by the page,
+ * which is exactly the case a "is the value still among the options" check
+ * cannot catch.
+ */
+function invalidateDependentsOf(parentId, seen = new Set()) {
+  const out = [];
+  for (const f of S.fields) {
+    if (f.dependsOn !== parentId || seen.has(f.id)) continue;
+    seen.add(f.id);
+    const cur = S.filled[f.id];
+    if (cur !== undefined && cur !== null && String(cur) !== '') {
+      delete S.filled[f.id];
+      delete S.answered[f.id];
+      S.attempts[f.id] = 0;
+      if (S.pending?.fieldId === f.id) S.pending = null;
+      const rec = { fieldId: f.id, label: f.label || f.id, dropped: String(Array.isArray(cur) ? cur.join(', ') : cur), why: 'parent-changed', at: Date.now() };
+      out.push(rec);
+      S.stale.push(rec);
+      if (S.stale.length > 20) S.stale.shift();
+    }
+    out.push(...invalidateDependentsOf(f.id, seen));
+  }
+  return out;
+}
+
+/**
+ * Fold a dependent field's refreshed option list into the session (PRD F4.1).
+ *
+ * Only options move. The pointer, the trail and every other answer are left
+ * exactly as they are - this is a narrower operation than updateFields and must
+ * not be able to move the user.
+ */
+function applyDependents(dependents) {
+  const changed = [];
+  for (const d of dependents) {
+    const f = S.fields.find(x => x.id === d.id);
+    if (!f) continue;
+    f.options = d.options || [];
+    f.optionCount = f.options.length;
+    f.awaitingParent = !!d.awaitingParent;
+    changed.push({ fieldId: f.id, label: f.label, was: d.wasOptionCount, now: f.optionCount });
+  }
+  invalidateStaleSelections();
+  return changed;
+}
+
+/**
+ * Drop answers a rebuilt option list no longer contains (PRD F4.1).
+ *
+ * Only choice fields, and only when the page has actually given the field
+ * options: an empty list is a field the page has not populated yet, not a
+ * field whose answer has become wrong.
+ */
+function invalidateStaleSelections() {
+  const out = [];
+  for (const f of S.fields) {
+    if (!f.options || !f.options.length) continue;
+    const cur = S.filled[f.id];
+    if (cur === undefined || cur === null || cur === '') continue;
+    const held = (Array.isArray(cur) ? cur : [cur]).map(String);
+    const ok = new Set(f.options.flatMap(o => [String(o.value), String(o.text)]));
+    if (held.every(v => ok.has(v))) continue;
+    delete S.filled[f.id];
+    delete S.answered[f.id];
+    S.attempts[f.id] = 0;
+    if (S.pending?.fieldId === f.id) S.pending = null;
+    const rec = { fieldId: f.id, label: f.label || f.id, dropped: held.join(', '), at: Date.now() };
+    out.push(rec);
+    S.stale.push(rec);
+    if (S.stale.length > 20) S.stale.shift();
+  }
+  return out;
+}
+
+/**
+ * The page's whole complaint list -> the first field it names, spoken and
+ * navigated to (PRD F4.3).
+ *
+ * For the case constraint validation cannot cover: a submit that comes back
+ * with errors on fields the session left several questions ago. The content
+ * script reports which fields the page marks invalid; the decision of where to
+ * go is made here, over the session's own field list, and the move goes through
+ * the same resolver every other navigation does.
+ */
+async function reviewInvalid(invalid) {
+  const list = (Array.isArray(invalid) ? invalid : [])
+    .filter(v => S.fields.some(f => f.id === v.id));
+  S.invalidSweep = { at: Date.now(), count: list.length, fields: list.map(v => v.id) };
+  if (!list.length) {
+    await speak('Nothing on the form is marked as a problem.', { kind: 'info', why: 'validate-clean' });
+    return { ok: true, invalid: [], moved: false };
+  }
+  const first = list[0];
+  const f = S.fields.find(x => x.id === first.id);
+  const n = list.length;
+  await speak(
+    n === 1
+      ? `The form has one problem, on ${f.label || 'a field'}. ${pauseToken(300)}${explainRejection(first.reason, f)}.`
+      : `The form has ${n} problems. ${pauseToken(300)}The first is ${f.label || 'a field'}. ${pauseToken(300)}${explainRejection(first.reason, f)}.`,
+    { kind: 'error', fieldId: f.id, why: 'invalid-sweep' });
+  const r = await navigate({ kind: 'field', field_reference: f.label || f.id }, { why: 'nav' });
+  return { ok: true, invalid: list, moved: !!r.navigated, index: S.index };
 }
 
 function stopSession() {
@@ -1620,6 +1846,7 @@ function stopSession() {
   S.order.abandonAll('session-stop');
   S.listening = false; S.ptt = null; S.openBinding = null; S.pending = null; S.learn = null;
   S.trail = []; S.labels = {}; S.lastNav = null;
+  S.rejected = {}; S.stale = []; S.steps = 0; S.invalidSweep = null;
   S.epoch += 1;
   S.index = -1; S.fields = [];
   if (S.reconnect.timer) { clearTimeout(S.reconnect.timer); S.reconnect.timer = null; }
@@ -1651,9 +1878,14 @@ function snapshot() {
     pending: S.pending ? { display: S.pending.display, intent: S.pending.intent, fieldId: S.pending.fieldId, value: S.pending.value, spoken: S.pending.spoken } : null,
     lastTranscript: S.lastTranscript, lastSttError: S.lastStt?.error ?? null, lastSttMs: S.lastStt?.ms ?? null, lastSttSeconds: S.lastStt?.seconds ?? null,
     attempts: S.attempts, filled: S.filled, filledCount: Object.keys(S.filled).length, answered: S.answered,
+    // Phase 4: the values the page refused, the selections a rebuilt list
+    // invalidated, how many times the form replaced itself, and the last
+    // form-wide validation sweep.
+    rejected: S.rejected, stale: S.stale.slice(-10), steps: S.steps, invalidSweep: S.invalidSweep,
+    dependents: S.fields.filter(f => f.dependsOn).map(f => ({ id: f.id, label: f.label, dependsOn: f.dependsOn, via: f.dependsSource, optionCount: f.optionCount, awaitingParent: !!f.awaitingParent })),
     // The user's own path through the form, and the last navigation decided on
     // it - the evidence for why "the previous field" was the field it was.
-    trail: S.trail.slice(-24), lastNav: S.lastNav,
+    trail: S.trail.slice(-24), lastNav: S.lastNav, labels: S.labels,
     queue: Q.length, capturesInFlight: S.order.pendingCount, capturesSwept: S.order.swept,
     machine: { state: S.state, illegal: S.machine.illegal, illegalCount: S.machine.illegalCount, history: S.machine.history.slice(-12) },
     ledger: S.ledger.last(14),
@@ -1727,6 +1959,8 @@ chrome.runtime.onMessage.addListener((msg, _s, respond) => {
         case 'OFF_REPEAT':         respond(await speakCurrent({ why: 'repeat' })); break;
         case 'OFF_SPEAK':          respond(await speak(msg.text, { kind: msg.kind || 'info', why: 'manual' })); break;
         case 'OFF_UPDATE_FIELDS':  respond(updateFields(msg.fields)); break;
+        case 'OFF_RESCAN':         respond(await rescanPage()); break;
+        case 'OFF_REVIEW_INVALID': respond(await reviewInvalid(msg.invalid ?? await invalidOnPage())); break;
         case 'OFF_STATE':          respond(snapshot()); break;
         case 'OFF_LEDGER':         respond({ ok: true, ledger: S.ledger.entries, metrics: S.metrics, machine: { illegal: S.machine.illegal, history: S.machine.history } }); break;
         case 'OFF_LISTEN_START':   respond(await listenStart()); break;

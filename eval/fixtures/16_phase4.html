@@ -1,0 +1,224 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Phase 4 robustness fixture</title>
+<style>
+ body{font:15px system-ui;max-width:680px;margin:24px auto;padding:0 16px}
+ label,.q{display:block;margin-top:14px;font-weight:600}
+ input,select{font:inherit;padding:6px;width:100%;max-width:340px}
+ [hidden]{display:none}
+ .err{color:#b00;font-size:13px}
+ /* Custom controls: real widgets built out of divs, styled the way a design
+    system does, with the ARIA that makes them operable. */
+ .combo{max-width:340px;position:relative}
+ .combo .trigger{border:1px solid #999;border-radius:4px;padding:7px;cursor:pointer;background:#fff}
+ .combo ul{list-style:none;margin:2px 0 0;padding:0;border:1px solid #999;border-radius:4px;
+           position:absolute;background:#fff;width:100%;z-index:9}
+ .combo li{padding:6px 8px;cursor:pointer}
+ .combo li[aria-selected=true]{background:#dce9ff}
+ .pill{display:inline-block;border:1px solid #999;border-radius:14px;padding:5px 12px;margin:4px 4px 0 0;cursor:pointer}
+ .pill[aria-checked=true],.pill[aria-selected=true]{background:#2b5cff;color:#fff;border-color:#2b5cff}
+</style>
+</head><body>
+<h1>Robustness</h1>
+<!--
+  One page for every Phase 4 shape, because they interact: a dependent select
+  that a wizard step takes away, a masked field that also validates, a custom
+  control whose options only exist while it is open.
+
+  Nothing here is friendly to the extension. The cascade repopulates
+  asynchronously the way a real one fetches; the masked phone rewrites whatever
+  is typed into it; the custom select keeps its options out of the DOM until it
+  is opened; the coupon field rejects a value and says why.
+-->
+<form id="f">
+
+<div id="step1">
+  <!-- ---------------------------------------------- F4.1 dependent fields -->
+  <label for="country">Country</label>
+  <select id="country" name="country">
+    <option value="">Please choose</option>
+    <option value="GB">United Kingdom</option>
+    <option value="US">United States</option>
+  </select>
+
+  <label for="state">State or province</label>
+  <select id="state" name="state"><option value="">Please choose</option></select>
+
+  <label for="city">City</label>
+  <select id="city" name="city"><option value="">Please choose</option></select>
+
+  <!-- ------------------------------------------------- F4.5 masked inputs -->
+  <label for="phone">Phone number</label>
+  <input id="phone" name="phone" type="tel" placeholder="(555) 555-5555">
+
+  <label for="postcode">Postal code</label>
+  <input id="postcode" name="postcode" placeholder="#### ###"
+         pattern="[A-Za-z0-9]{4} [A-Za-z0-9]{3}" title="Four characters, a space, then three">
+
+  <!-- ---------------------------------------------------- F4.4 date inputs -->
+  <label for="start">Start date</label>
+  <input id="start" name="start" type="date">
+
+  <label for="expiry">Expiry</label>
+  <input id="expiry" name="expiry" type="month">
+
+  <label for="renewal">Renewal date</label>
+  <input id="renewal" name="renewal" placeholder="MM/DD/YYYY">
+</div>
+
+<div id="step2" hidden>
+  <!-- ------------------------------------- F4.6 native checkbox/radio groups -->
+  <fieldset>
+    <legend>Delivery speed</legend>
+    <label><input type="radio" name="speed" value="standard"> Standard</label>
+    <label><input type="radio" name="speed" value="express"> Express</label>
+    <label><input type="radio" name="speed" value="overnight"> Overnight</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Optional extras</legend>
+    <label><input type="checkbox" name="extras" value="insurance"> Insurance</label>
+    <label><input type="checkbox" name="extras" value="tracking"> Tracking</label>
+    <label><input type="checkbox" name="extras" value="signature"> Signature on delivery</label>
+  </fieldset>
+
+  <!-- ------------------------------------------- F4.7 custom form controls -->
+  <span class="q" id="planq">Support plan</span>
+  <div class="combo">
+    <div id="plan" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+         aria-labelledby="planq" aria-controls="plan-list" tabindex="0">
+      <div class="trigger" id="plan-trigger">Please choose</div>
+    </div>
+    <ul id="plan-list" role="listbox" aria-labelledby="planq" hidden></ul>
+  </div>
+
+  <span class="q" id="tierq">Billing tier</span>
+  <div role="radiogroup" aria-labelledby="tierq" id="tier">
+    <span class="pill" role="radio" aria-checked="false" data-value="monthly" tabindex="0">Monthly</span>
+    <span class="pill" role="radio" aria-checked="false" data-value="annual" tabindex="0">Annual</span>
+  </div>
+
+  <span class="q" id="chanq">Contact channels</span>
+  <div role="group" aria-labelledby="chanq" id="channels">
+    <span class="pill" role="checkbox" aria-checked="false" data-value="email">Email</span>
+    <span class="pill" role="checkbox" aria-checked="false" data-value="sms">Text message</span>
+    <span class="pill" role="checkbox" aria-checked="false" data-value="post">Post</span>
+  </div>
+
+  <!-- ------------------------------------------- F4.3 validation, with a why -->
+  <label for="coupon">Coupon code</label>
+  <input id="coupon" name="coupon">
+  <div class="err" id="coupon-err" hidden>That coupon code has expired</div>
+</div>
+</form>
+
+<button type="button" id="next">Next step</button>
+<button type="button" id="back">Previous step</button>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+/* ------------------------------------ F4.1: an asynchronous cascade ------- */
+const PLACES = {
+  GB: { England: ['London', 'Bristol', 'Leeds'], Scotland: ['Glasgow', 'Edinburgh'] },
+  US: { California: ['Los Angeles', 'San Diego'], Texas: ['Austin', 'Dallas'] },
+};
+// Real cascades fetch. This one takes a tick, so the extension has to WAIT for
+// the list rather than read the empty one it saw a moment before.
+const fill = (sel, items) => {
+  sel.innerHTML = '<option value="">Please choose</option>'
+    + items.map(t => `<option value="${t}">${t}</option>`).join('');
+};
+$('country').addEventListener('change', () => {
+  fill($('state'), []); fill($('city'), []);
+  const c = PLACES[$('country').value];
+  setTimeout(() => { if (c) fill($('state'), Object.keys(c)); }, 120);
+});
+$('state').addEventListener('change', () => {
+  fill($('city'), []);
+  const c = PLACES[$('country').value];
+  const cities = c && c[$('state').value];
+  setTimeout(() => { if (cities) fill($('city'), cities); }, 120);
+});
+
+/* --------------------------- F4.5: a phone field that owns its own format -- */
+// Assignment is honoured but immediately reformatted, which is the shape that
+// breaks a writer checking `el.value === what I wrote`.
+const reformat = () => {
+  const d = $('phone').value.replace(/\D/g, '').slice(0, 10);
+  const out = d.length > 6 ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`
+            : d.length > 3 ? `(${d.slice(0,3)}) ${d.slice(3)}`
+            : d.length ? `(${d}` : '';
+  if ($('phone').value !== out) $('phone').value = out;
+};
+$('phone').addEventListener('input', reformat);
+$('phone').addEventListener('change', reformat);
+
+/* ------------------------------------------ F4.7: a custom select widget -- */
+const PLANS = [['basic','Basic'],['pro','Professional'],['ent','Enterprise']];
+const combo = $('plan'), list = $('plan-list');
+// The options do not exist in the DOM until the widget is opened - the reason
+// the FieldGraph reports no options and the writer opens it to find them.
+function openPlan(on) {
+  combo.setAttribute('aria-expanded', String(on));
+  list.hidden = !on;
+  if (!on) { list.innerHTML = ''; return; }
+  list.innerHTML = PLANS.map(([v, t], i) =>
+    `<li role="option" id="plan-opt-${i}" data-value="${v}" aria-selected="false">${t}</li>`).join('');
+}
+combo.addEventListener('click', () => openPlan(combo.getAttribute('aria-expanded') !== 'true'));
+list.addEventListener('click', (e) => {
+  const li = e.target.closest('[role=option]');
+  if (!li) return;
+  [...list.children].forEach(n => n.setAttribute('aria-selected', String(n === li)));
+  combo.setAttribute('aria-activedescendant', li.id);
+  $('plan-trigger').textContent = li.textContent;
+  combo.dataset.value = li.dataset.value;
+  openPlan(false);
+});
+
+/* ------------------------------- F4.7: custom radios and custom checkboxes - */
+$('tier').addEventListener('click', (e) => {
+  const n = e.target.closest('[role=radio]'); if (!n) return;
+  [...$('tier').children].forEach(c => c.setAttribute('aria-checked', String(c === n)));
+});
+$('channels').addEventListener('click', (e) => {
+  const n = e.target.closest('[role=checkbox]'); if (!n) return;
+  n.setAttribute('aria-checked', n.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+});
+
+/* ---------------------------------------- F4.3: a field that says why not -- */
+$('coupon').addEventListener('change', () => {
+  const bad = $('coupon').value && $('coupon').value.toUpperCase() !== 'SPRING26';
+  $('coupon-err').hidden = !bad;
+  $('coupon').setAttribute('aria-invalid', bad ? 'true' : 'false');
+  if (bad) $('coupon').setAttribute('aria-describedby', 'coupon-err');
+});
+
+/* -------------------------------------------------- F4.2: the wizard ------ */
+window.__step = (n) => { $('step1').hidden = n !== 1; $('step2').hidden = n !== 2; };
+$('next').addEventListener('click', () => window.__step(2));
+$('back').addEventListener('click', () => window.__step(1));
+
+const checked = (name) => [...document.querySelectorAll(`input[name=${name}]:checked`)].map(e => e.value);
+const ariaOn = (id, role) => [...$(id).querySelectorAll(`[role=${role}]`)]
+  .filter(n => n.getAttribute('aria-checked') === 'true').map(n => n.dataset.value);
+
+window.__formState = () => ({
+  country: $('country').value, state: $('state').value, city: $('city').value,
+  stateOptions: [...$('state').options].length - 1, cityOptions: [...$('city').options].length - 1,
+  phone: $('phone').value, postcode: $('postcode').value,
+  start: $('start').value, expiry: $('expiry').value, renewal: $('renewal').value,
+  speed: (checked('speed')[0] || ''), extras: checked('extras'),
+  plan: combo.dataset.value || '', tier: ariaOn('tier','radio')[0] || '', channels: ariaOn('channels','checkbox'),
+  coupon: $('coupon').value, couponError: !$('coupon-err').hidden,
+  step: $('step2').hidden ? 1 : 2,
+});
+window.__reset = () => {
+  $('f').reset(); fill($('state'), []); fill($('city'), []);
+  $('phone').value = ''; combo.removeAttribute('data-value'); combo.removeAttribute('aria-activedescendant');
+  $('plan-trigger').textContent = 'Please choose'; openPlan(false);
+  [...$('tier').children, ...$('channels').children].forEach(n => n.setAttribute('aria-checked','false'));
+  $('coupon-err').hidden = true; $('coupon').removeAttribute('aria-invalid');
+  window.__step(1);
+};
+</script>
+</body></html>

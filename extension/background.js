@@ -219,6 +219,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
 
+        // F4.3: offscreen -> page. The session asks the page what it is
+        // complaining about; the page reports, the session decides.
+        case 'VF_FIND_INVALID': {
+          const tabId = msg.tabId ?? activeTabId;
+          if (!tabId) { sendResponse({ ok: false, error: 'no active tab' }); break; }
+          try { sendResponse(await toContent(tabId, { type: 'VF_FIND_INVALID' })); }
+          catch (e) { sendResponse({ ok: false, error: String(e?.message || e) }); }
+          break;
+        }
+
+        // F4.9: offscreen -> page. An explicit rescan, not the debounced one.
+        case 'VF_RESCAN_PAGE': {
+          const tabId = msg.tabId ?? activeTabId;
+          if (!tabId) { sendResponse({ ok: false, error: 'no active tab' }); break; }
+          try { sendResponse(await toContent(tabId, { type: 'VF_RESCAN' })); }
+          catch (e) { sendResponse({ ok: false, error: String(e?.message || e) }); }
+          break;
+        }
+
+        // F4.3: user -> session. Sweep the whole form for what the page has
+        // rejected and go to the first field it names.
+        case 'VF_CHECK_FORM':
+          sendResponse(await toOffscreen({ type: 'OFF_REVIEW_INVALID' }));
+          break;
+
+        // F4.9: user -> session. Re-read the form after a step or a submit.
+        case 'VF_RESCAN':
+          sendResponse(await toOffscreen({ type: 'OFF_RESCAN' }));
+          break;
+
         // Page -> offscreen: the DOM changed under an SPA remount.
         case 'VF_FIELDS_CHANGED': {
           if (sender?.tab?.id && sender.tab.id !== activeTabId) { sendResponse({ ok: false, ignored: 'inactive tab' }); break; }

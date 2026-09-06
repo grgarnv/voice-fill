@@ -33,7 +33,11 @@
     "test:memory": "node tools/test_memory.mjs",
     "test:memory-form": "node tools/test_memory_form.mjs",
     "test:navigation": "node tools/test_navigation.mjs",
-    "test:navigation-form": "node tools/test_navigation_form.mjs"
+    "test:navigation-form": "node tools/test_navigation_form.mjs",
+    "test:phase4": "node tools/test_phase4.mjs",
+    "test:phase4-dom": "node tools/test_phase4_dom.mjs",
+    "test:phase4-form": "node tools/test_phase4_form.mjs",
+    "phase4": "node tools/phase4.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

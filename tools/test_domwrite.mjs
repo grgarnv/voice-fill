@@ -34,19 +34,22 @@ const page = await newPage(cdp);
 
 /** Scan, then write to a named field, returning both the DOM and React views. */
 async function writeField(name, value) {
-  return page.eval(`(() => {
+  // write() is async since Phase 4: a controlled input's revert and a custom
+  // listbox's opening both land a task later, and the result is only true once
+  // they have had their chance.
+  return page.eval(`(async () => {
     const g = VFFieldGraph.scan(document);
     const i = g.fields.findIndex(f => f.name === ${JSON.stringify(name)});
     if (i < 0) return { found: false, names: g.fields.map(f => f.name) };
     const field = g.fields[i];
     const els = g.elements[i];
-    const r = VFDomWrite.write(els, field.type, ${JSON.stringify(value)});
+    const r = await VFDomWrite.write(els, field.type, ${JSON.stringify(value)});
     return {
       found: true, type: field.type, result: r,
       current: VFDomWrite.readCurrent(els, field.type),
       validity: VFDomWrite.validate(els),
     };
-  })()`);
+  })()`, { awaitPromise: true });
 }
 
 const reactState = () => page.eval('window.__reactState');

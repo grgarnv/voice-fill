@@ -162,10 +162,19 @@ async function testMalformed(page) {
   rec('malformed: contenteditable is a field',
       fields.some(f => f.type === 'contenteditable'), fields.map(f => f.type).join(','));
   const combo = fields.find(f => f.type === 'combobox');
-  const rgroup = fields.find(f => f.type === 'radiogroup' && f.name === '');
+  // Phase 4 renamed the div-built group to `aria-radiogroup`. The old name was
+  // shared with a collapsed group of NATIVE radios, and the writer dispatched
+  // both to writeRadio() - which reads `.value` and `.labels` off elements that
+  // are divs, so a role=radiogroup was scanned and could never be filled. The
+  // two are separate types now, and each has a writer that works on it.
+  const rgroup = fields.find(f => f.type === 'aria-radiogroup' && f.name === '');
   rec('malformed: role=combobox / role=radiogroup ARIA widgets are found and named',
       !!combo && combo.label === 'Delivery slot' && !!rgroup && rgroup.label === 'Contact preference',
       `combo=${combo?.label} radiogroup=${rgroup?.label}`);
+  rec('malformed: a div-built radio group offers its options, not one field per option',
+      (rgroup?.options || []).map(o => o.text ?? o).join('|') === 'By email|By phone'
+      && !fields.some(f => f.label === 'By email'),
+      JSON.stringify(rgroup?.options));
 
   // tabindex 1 and 2 must be read BEFORE every tabindex-0 field.
   const i3 = fields.findIndex(f => f.name === 't3');

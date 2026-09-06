@@ -40,6 +40,43 @@
     return Array.isArray(e) ? e[0] : e;
   };
 
+  /* --------------------------------------------- dependent fields (F4.1) --- */
+
+  const dependentsOf = (fieldId) => graph.fields.filter(f => f.dependsOn === fieldId);
+
+  /**
+   * Re-read the fields whose contents depend on the one just answered.
+   *
+   * The page repopulates them itself, asynchronously and on its own schedule -
+   * a cascading country select usually fetches. So this waits for the option
+   * list to actually change, up to a bounded number of frames, and then says
+   * what it found. It never populates anything: if the page does not, the
+   * dependent field is reported still empty and the session asks nothing it
+   * cannot offer answers for.
+   */
+  async function refreshDependents(dependents, { tries = 12, everyMs = 60 } = {}) {
+    const before = new Map(dependents.map(f => [f.id, f.optionCount]));
+    for (let i = 0; i < tries; i++) {
+      await new Promise(r => setTimeout(r, everyMs));
+      rescan();
+      const now = graph.fields.filter(f => before.has(f.id));
+      if (now.some(f => f.optionCount !== before.get(f.id))) break;
+    }
+    // Tell the session the shape changed, on the same channel an SPA remount
+    // uses. Updating lastSignature here would leave the observer with nothing
+    // to report, and the session holding the empty option list it started with.
+    lastSignature = signature(graph);
+    try {
+      chrome.runtime.sendMessage({ type: 'VF_FIELDS_CHANGED', fields: graph.fields, frame: where, why: 'dependent' }).catch(() => {});
+    } catch {}
+    return graph.fields
+      .filter(f => before.has(f.id))
+      .map(f => ({
+        id: f.id, label: f.label, optionCount: f.optionCount, options: f.options,
+        awaitingParent: f.awaitingParent, wasOptionCount: before.get(f.id),
+      }));
+  }
+
   /* ------------------------------------------------------- focus ring F1.5 -- */
   //
   // An overlay div, not a CSS outline on the field itself: page stylesheets
@@ -104,7 +141,10 @@
   let observer = null;
   let lastSignature = '';
 
-  const signature = (g) => g.fields.map(f => f.id).join('|');
+  // The FieldGraph's own signature: ids, types, option counts, labels and
+  // requiredness. Ids alone missed a dependent select being populated - the
+  // change that matters most on a cascading form (F4.1 / F4.9).
+  const signature = (g) => g.signature ?? FG.signatureOf(g.fields || []);
 
   function startObserver() {
     if (observer) return;
@@ -130,7 +170,12 @@
     });
     observer.observe(document.documentElement, {
       childList: true, subtree: true,
-      attributes: true, attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'disabled', 'type'],
+      attributes: true,
+      attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'disabled', 'type',
+        // F4: a cascading select is repopulated, a wizard step is swapped in,
+        // a custom control changes its selection - none of which touch an id.
+        'required', 'aria-required', 'aria-invalid', 'aria-expanded', 'aria-checked',
+        'aria-selected', 'aria-disabled', 'value', 'placeholder', 'role'],
     });
   }
 
@@ -202,15 +247,43 @@
         const i = indexFor(msg.fieldId);
         // msg.type is the MESSAGE type; the field's type travels as fieldType.
         const type = msg.fieldType || graph.fields[i]?.type;
-        const w = DW.write(els, type, msg.value);
-        // Validation is read AFTER the write and after the blur, because that
-        // is when a page decides to complain.
-        const v = DW.validate(els);
-        respond({
-          ok: !!w.ok, written: w.written, error: w.error || null,
-          valid: v.valid, reason: v.reason, validationSource: v.source,
-          current: DW.readCurrent(els, type),
-        });
+        // Async since F4: a controlled input reverts a task later and a custom
+        // listbox opens a frame later. Both are awaited before anything is
+        // reported, so `ok` is a fact rather than a hope.
+        DW.write(els, type, msg.value).then(async (w) => {
+          const v = DW.validate(els);
+          // A dependent field's options are a function of this answer, so the
+          // graph is rebuilt before the session is told the write landed - the
+          // next question is then asked against the list the page really has.
+          const dependents = dependentsOf(msg.fieldId);
+          let refreshed = null;
+          if (dependents.length) refreshed = await refreshDependents(dependents);
+          respond({
+            ok: !!w.ok, written: w.written, error: w.error || null,
+            valid: v.valid, reason: v.reason, validationSource: v.source,
+            current: DW.readCurrent(els, type),
+            dependents: refreshed,
+          });
+        }).catch(e => respond({ ok: false, error: String(e?.message || e) }));
+        return true;
+      }
+
+      // F4.9: an explicit rescan, for a caller that knows the DOM moved (a
+      // wizard step, a submit) and will not wait for the observer's debounce.
+      case 'VF_RESCAN': {
+        rescan();
+        lastSignature = signature(graph);
+        startObserver();
+        respond({ ok: true, fields: graph.fields, skipped: graph.skipped, frame: where, url: location.href });
+        return true;
+      }
+
+      // F4.3: everything the page is complaining about right now, mapped back
+      // to the session's own field ids. It reports; it decides nothing.
+      case 'VF_FIND_INVALID': {
+        const byId = {};
+        graph.fields.forEach((f, i) => { byId[f.id] = graph.elements[i]; });
+        respond({ ok: true, invalid: DW.findInvalid(byId) });
         return true;
       }
 

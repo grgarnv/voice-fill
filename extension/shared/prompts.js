@@ -53,6 +53,11 @@ globalThis.VFPrompts = (() => {
     radiogroup: 'choice', checkboxgroup: 'multichoice',
     checkbox: 'yesno', textarea: 'comment', combobox: 'choice',
     contenteditable: 'comment',
+    // Custom controls (PRD F4.7). A widget built out of divs asks exactly the
+    // same question as the native control it imitates, so it gets the same
+    // intent and the same prompt - the difference is only in how it is written.
+    'aria-radiogroup': 'choice', 'aria-checkboxgroup': 'multichoice',
+    'aria-checkbox': 'yesno',
   };
 
   /**
@@ -62,7 +67,8 @@ globalThis.VFPrompts = (() => {
   function classify(field) {
     const t = field.type;
     if (t === 'select' || t === 'select-multiple' || t === 'radiogroup' ||
-        t === 'checkboxgroup' || t === 'checkbox' || t === 'file' || t === 'color') {
+        t === 'checkboxgroup' || t === 'checkbox' || t === 'file' || t === 'color' ||
+        t === 'combobox' || t === 'aria-radiogroup' || t === 'aria-checkboxgroup' || t === 'aria-checkbox') {
       return TYPE_INTENT[t];
     }
     if (TYPE_INTENT[t] && t !== 'text') {
