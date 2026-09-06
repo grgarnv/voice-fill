@@ -141,7 +141,7 @@ Interpreting:
 - Relative selections resolve against the options list: "the first two", "first and third", "all four", "the other one", "just those two".
 - Corrections resolve against current_value or the pending confirmation. Return the COMPLETE corrected value, never a fragment and never an instruction: with pending value "160071", "the last digit is two" is CORRECT_VALUE with value "160072". With "Arjun", "no no, it's Arnav" is CORRECT_VALUE with value "Arnav".
 - A bare agreement ("yes", "that's right", "perfect") is ACCEPT_CONFIRMATION; a bare disagreement ("no", "that's wrong") is REJECT_CONFIRMATION. A disagreement that also carries the right answer is CORRECT_VALUE. Both require pending_confirmation to be non-null - there is nothing to accept or reject otherwise, and the correct answer is REQUEST_CLARIFICATION.
-- Values must fit the field: digit fields take digits only, dates are YYYY-MM-DD, a choice field's value must be an option's exact label.
+- Values must fit the field: digit fields take digits only, dates are YYYY-MM-DD, times are 24-hour HH:MM, a choice field's value must be an option's exact label.
 - The newest thing the person said supersedes anything earlier in the conversation.
 
 Spelling and capitalisation are structure, not text:

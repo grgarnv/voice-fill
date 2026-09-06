@@ -296,7 +296,7 @@ globalThis.VFIntent = (() => {
    * OPTION's own value and never a model's or an assembler's spelling of it.
    */
   function shapeValue(v, intent, options = []) {
-    const raw = String(v ?? '').trim();
+    const raw = coerceTime(String(v ?? '').trim(), intent);
     if (!raw || raw.length > 200) return null;
     if (valueShapeError(raw, intent, options)) return null;
     const isChoice = options.length && (intent === 'choice' || intent === 'multichoice');
@@ -605,6 +605,7 @@ globalThis.VFIntent = (() => {
         }
         // A value that is not what this field can hold is not made valid by the
         // model being sure about it.
+        v = coerceTime(v, intent);
         const bad = valueShapeError(v, intent, options);
         if (bad) return reject(bad, v);
         // For a choice field the option's OWN value is what the DOM writer
@@ -631,6 +632,15 @@ globalThis.VFIntent = (() => {
     }
   }
 
+  /**
+   * A time the model wrote the way people say it ("7:30 PM") is a good answer
+   * in the wrong shape; only "HH:MM" reaches a time input.
+   */
+  function coerceTime(v, intent) {
+    if (intent !== 'time' || /^\d{2}:\d{2}$/.test(v)) return v;
+    return globalThis.VFNormalize?.parseTime(v) || v;
+  }
+
   /** Field-shape rules the model does not get to override. */
   function valueShapeError(v, intent, options) {
     if (/[<>{}]/.test(v)) return 'value-has-markup';
@@ -638,6 +648,7 @@ globalThis.VFIntent = (() => {
     if (intent === 'email' && !/^[^@\s]+@[^@\s]+$/.test(v.trim())) return 'not-an-email';
     if (intent === 'yesno' && !/^(true|false|yes|no)$/i.test(v.trim())) return 'not-a-yesno';
     if ((intent === 'date' || intent === 'dob') && !/^\d{4}-\d{2}-\d{2}$/.test(v.trim())) return 'not-an-iso-date';
+    if (intent === 'time' && !/^\d{2}:\d{2}$/.test(v.trim())) return 'not-a-time';
     // Membership in the option list is checked by matchAllOptions, which can
     // also resolve a value naming several of them.
     return null;

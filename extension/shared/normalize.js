@@ -193,6 +193,20 @@ globalThis.VFNormalize = (() => {
     return `${month[0].toUpperCase()}${month.slice(1)} ${dayWord}, ${pause(200)}${speakYear(y)}`;
   }
 
+  /**
+   * "19:30" -> the way a person says it. Reading the 24-hour string back
+   * verbatim ("nineteen thirty") is not how anyone confirms a delivery slot.
+   */
+  function speakTime(hhmm) {
+    const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm ?? '').trim());
+    if (!m) return String(hhmm ?? '');
+    const h = Number(m[1]), mi = Number(m[2]);
+    if (h > 23 || mi > 59) return String(hhmm);
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    const mins = mi === 0 ? "o'clock" : mi < 10 ? `oh ${speakNumber(mi)}` : speakNumber(mi);
+    return `${speakNumber(h12)} ${mins} ${h < 12 ? 'A M' : 'P M'}`;
+  }
+
   function speakEmail(s) {
     const t = String(s ?? '').trim();
     if (!t) return '';
@@ -269,6 +283,7 @@ globalThis.VFNormalize = (() => {
       case 'phone':    return speakPhone(v);
       case 'date':
       case 'dob':      return speakDate(v);
+      case 'time':     return speakTime(v);
       case 'email':    return speakEmail(v);
       case 'amount':   return speakAmount(v);
       case 'name':     return speakName(v);
@@ -570,6 +585,77 @@ globalThis.VFNormalize = (() => {
     return null;
   }
 
+  // Only the unambiguous number words. DIGIT_WORDS carries STT homophones
+  // ("to", "for", "ate") that are ordinary English inside a spoken time.
+  const CLOCK_WORDS = { ...TEENS, ...TENS, zero: 0, oh: 0, o: 0,
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+
+  /** The numbers in a spoken time, in order, digit runs kept as written. */
+  function clockNumbers(text) {
+    const tokens = String(text ?? '').split(/\s+/).map(w => w.replace(/[^a-z0-9]/g, '')).filter(Boolean);
+    const out = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const w = tokens[i];
+      if (/^\d+$/.test(w)) { out.push(w); continue; }
+      if (!(w in CLOCK_WORDS)) continue;
+      let n = CLOCK_WORDS[w];
+      // "seven thirty five" is 7:35, not 7:30 then 5.
+      if (w in TENS && tokens[i + 1] in CLOCK_WORDS && CLOCK_WORDS[tokens[i + 1]] < 10) n += CLOCK_WORDS[tokens[++i]];
+      if (n === 0 && !/^(zero)$/.test(w) && out.length) continue; // a filler "oh" in "seven oh five"
+      out.push(String(n));
+    }
+    return out;
+  }
+
+  /**
+   * Spoken time -> "HH:MM", the only shape <input type=time> accepts.
+   *
+   * Without this the transcript went to the field verbatim and the browser
+   * silently dropped it - a time field looked filled in the log and was empty
+   * on the page (httpbin's "Preferred delivery time").
+   */
+  function parseTime(text) {
+    let t = String(text ?? '').toLowerCase()
+      .replace(/[.,]/g, ' ')
+      .replace(/\bo'?\s?clock\b/g, ' ')
+      .replace(/[-\u2013]/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    if (!t) return null;
+    if (/\b(noon|midday)\b/.test(t)) return '12:00';
+    if (/\bmidnight\b/.test(t)) return '00:00';
+
+    // The recogniser writes the meridiem as "pm", "p m" or "p.m." (dots are
+    // spaces by now); a time of day says it in words instead.
+    const mer = /\b([ap])\s?m\b/.exec(t);
+    let pm = mer ? mer[1] === 'p'
+      : /\b(afternoon|evening|tonight|night)\b/.test(t) ? true
+      : /\b(morning)\b/.test(t) ? false : null;
+    if (mer) t = t.replace(mer[0], ' ');
+
+    let h = null, m = 0;
+    const hhmm = /\b(\d{1,2})\s*[:h]\s*(\d{2})\b/.exec(t);
+    const rel = /^(.*?)\b(past|after|to|til|till|until)\b(.*)$/.exec(t);
+    if (hhmm) {
+      h = Number(hhmm[1]); m = Number(hhmm[2]);
+    } else if (rel && /\d|[a-z]/.test(rel[3])) {
+      const mins = /\bquarter\b/.test(rel[1]) ? 15 : /\bhalf\b/.test(rel[1]) ? 30 : Number(clockNumbers(rel[1])[0]);
+      const hour = Number(clockNumbers(rel[3])[0]);
+      if (!Number.isFinite(mins) || !Number.isFinite(hour)) return null;
+      if (/^(past|after)$/.test(rel[2])) { h = hour; m = mins; }
+      else { h = (hour + 23) % 24; m = 60 - mins; }
+    } else {
+      const nums = clockNumbers(t);
+      if (!nums.length) return null;
+      if (nums[0].length >= 3) { h = Number(nums[0].slice(0, -2)); m = Number(nums[0].slice(-2)); }
+      else { h = Number(nums[0]); m = nums[1] != null ? Number(nums[1]) : 0; }
+    }
+
+    if (pm === true && h < 12) h += 12;
+    if (pm === false && h === 12) h = 0;
+    if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
   /** Levenshtein, for matching a spoken answer against option labels. */
   function levenshtein(a, b) {
     a = String(a); b = String(b);
@@ -711,6 +797,12 @@ globalThis.VFNormalize = (() => {
         return res(d, { needsConfirmation: true });
       }
 
+      case 'time': {
+        const v = parseTime(raw);
+        if (!v) return res(null, { confidence: 0, note: 'could not read a time' });
+        return res(v, { display: v, needsConfirmation: true });
+      }
+
       case 'number':
       case 'age':
       case 'quantity': {
@@ -781,9 +873,10 @@ globalThis.VFNormalize = (() => {
   return {
     // value -> speech
     toSpeech, spellDigits, spellAlphanumeric, speakPhone, speakDate, speakEmail,
-    speakNumber, speakYear, speakName, speakAmount,
+    speakNumber, speakYear, speakName, speakAmount, speakTime,
     // speech -> value
     fromSpeech, wordsToDigits, wordsToNumber, deOrdinal, wordsToAlphanumeric, parseYesNo, parseDate,
+    parseTime,
     parseSpokenYear, parseEmail, matchOption, levenshtein, parseCommand,
     // config
     setPauseEnabled, setNamePhonemes, getNamePhonemes, isHighRisk,

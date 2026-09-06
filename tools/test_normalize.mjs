@@ -239,10 +239,24 @@ truthy('free text is not', !N.isHighRisk('freetext') && !N.isHighRisk('choice'))
 // but it proves the two directions are consistent, which is the part that is
 // this file's job.
 
+G('parseTime (time inputs)');
+// A native <input type=time> takes "HH:MM" and nothing else, so anything the
+// field cannot hold must come back null rather than as raw transcript.
+for (const [said, want] of [
+  ['7:30 PM', '19:30'], ['seven thirty p m', '19:30'], ['19:30', '19:30'],
+  ['half past seven in the evening', '19:30'], ['quarter to eight pm', '19:45'],
+  ['quarter past six pm', '18:15'], ['seven oh five am', '07:05'],
+  ['seven thirty five pm', '19:35'], ['noon', '12:00'], ['midnight', '00:00'],
+  ["six o'clock", '06:00'], ['1930', '19:30'], ['twelve thirty am', '00:30'],
+  ['eleven fifteen in the morning', '11:15'], ['banana', null], ['', null],
+]) eq(`"${said}" -> ${want}`, N.parseTime(said), want);
+eq('fromSpeech routes the time intent', N.fromSpeech('seven thirty pm', {}, 'time').value, '19:30');
+eq('speakTime reads the 24-hour value as a person says it', N.toSpeech('19:30', 'time'), 'seven thirty P M');
+
 G('round trip toSpeech -> fromSpeech');
 const RT = [
   ['160071', 'postal'], ['4821', 'postal'], ['SF7K0B2Q', 'idnumber'],
-  ['A1B2C3', 'idnumber'], ['5551234567', 'phone'], ['2026-06-14', 'dob'],
+  ['A1B2C3', 'idnumber'], ['5551234567', 'phone'], ['2026-06-14', 'dob'], ['19:30', 'time'], ['09:15', 'time'],
   ['1984-03-02', 'dob'], ['42', 'age'],
 ];
 for (const [value, intent] of RT) {
