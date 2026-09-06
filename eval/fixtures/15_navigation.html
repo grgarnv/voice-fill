@@ -1,0 +1,88 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Conversational navigation fixture</title>
+<style>body{font:15px system-ui;max-width:640px;margin:24px auto}
+label{display:block;margin-top:14px;font-weight:600}
+input,select{font:inherit;padding:6px;width:100%;max-width:340px}
+[hidden]{display:none}</style>
+</head><body>
+<h1>Account setup</h1>
+<!--
+  Fixture for conversational navigation.
+
+  Step 1 is an ordinary run of named fields - first name, last name, email,
+  phone, city - which is what "go back to my email" and "go back two fields"
+  have to resolve against.
+
+  Two things here exist to break the DOM-index reading of "the previous field":
+
+    middle name   INSERTED behind the pointer, once the user is past it. It is
+                  the previous DOM element for the field after it, and it is
+                  somewhere the user has never been.
+    contact time  CONDITIONAL on the phone number being filled, so it appears
+                  ahead of the pointer rather than behind it.
+
+  Step 2 replaces the whole field list, which is what a wizard does: the fields
+  of step 1 are gone from the DOM, and the session must say so rather than
+  navigate to whatever is nearest. Going back to step 1 restores them WITH
+  their values, which is the state a returning navigation must find.
+-->
+<form id="f">
+  <div id="step1">
+    <label for="first">First name</label>
+    <input id="first" name="first" autocomplete="given-name">
+
+    <div id="middleWrap" hidden>
+      <label for="middle">Middle name</label>
+      <input id="middle" name="middle">
+    </div>
+
+    <label for="last">Last name</label>
+    <input id="last" name="last" autocomplete="family-name">
+
+    <label for="email">Email address</label>
+    <input id="email" name="email" type="email">
+
+    <label for="phone">Phone number</label>
+    <input id="phone" name="phone" type="tel">
+
+    <div id="whenWrap" hidden>
+      <label for="when">Best time to call</label>
+      <select id="when" name="when">
+        <option value="">Please choose</option>
+        <option value="morning">Morning</option>
+        <option value="afternoon">Afternoon</option>
+        <option value="evening">Evening</option>
+      </select>
+    </div>
+
+    <label for="city">City</label>
+    <input id="city" name="city">
+  </div>
+
+  <div id="step2" hidden>
+    <label for="street">Street address</label>
+    <input id="street" name="street">
+
+    <label for="postcode">Postal code</label>
+    <input id="postcode" name="postcode" inputmode="numeric">
+  </div>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  // A phone number brings out the "best time to call" question, the way a real
+  // conditional does - on input, from the page, with no help from the extension.
+  $('phone').addEventListener('input', () => { $('whenWrap').hidden = !$('phone').value.trim(); });
+
+  window.__formState = () => {
+    const f = $('f');
+    return { first: f.first.value, middle: f.middle.value, last: f.last.value,
+             email: f.email.value, phone: f.phone.value, when: f.when.value,
+             city: f.city.value, street: f.street.value, postcode: f.postcode.value,
+             step: $('step2').hidden ? 1 : 2,
+             visible: [...f.querySelectorAll('input,select')].filter(e => e.offsetParent !== null).map(e => e.name) };
+  };
+  // The page's own controls. The harness drives these exactly as a user would.
+  window.__showMiddle = (on) => { $('middleWrap').hidden = !on; };
+  window.__step = (n) => { $('step1').hidden = n !== 1; $('step2').hidden = n !== 2; };
+  window.__reset = () => { $('f').reset(); $('middleWrap').hidden = true; $('whenWrap').hidden = true; window.__step(1); };
+</script>
+</body></html>

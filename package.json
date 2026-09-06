@@ -31,7 +31,9 @@
     "test:intent": "node tools/test_intent.mjs",
     "test:intent-form": "node tools/test_intent_form.mjs",
     "test:memory": "node tools/test_memory.mjs",
-    "test:memory-form": "node tools/test_memory_form.mjs"
+    "test:memory-form": "node tools/test_memory_form.mjs",
+    "test:navigation": "node tools/test_navigation.mjs",
+    "test:navigation-form": "node tools/test_navigation_form.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

@@ -403,6 +403,11 @@ S('15. Phase 3 invariants across the whole run');
 const pass = results.filter(r => r.ok).length, fail = results.filter(r => !r.ok);
 console.log(`\n  PASS ${pass}   FAIL ${fail.length}${LIVE ? '' : '   (provider not configured)'}\n`);
 try { await cdp.close(); } catch {}
-try { chrome.kill(); } catch {}
+// close(), not kill(): launchChrome returns a handle with close(), and the
+// missing method threw into the empty catch - leaving a headless Chrome, a
+// live VoiceFill session and its backend socket running after the suite
+// exited. The next suite then shared the machine with it and failed for
+// reasons that had nothing to do with the code under test.
+try { await chrome.close(); } catch {}
 srv.close(); reap();
 process.exit(fail.length ? 1 : 0);

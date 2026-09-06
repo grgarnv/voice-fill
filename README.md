@@ -63,6 +63,24 @@ Full design, the learning gate, the privacy rules and what is stored:
 [VOICE_MEMORY.md](./VOICE_MEMORY.md). Measurements and the acceptance audit:
 [VOICE_MEMORY_RESULTS.md](./VOICE_MEMORY_RESULTS.md).
 
+## Moving around the form by saying so
+
+A form is not a queue. People go back, change their minds mid-read-back, and
+name the field they want: "go back two fields", "take me back to my email",
+"the one before that", "I want to change what I entered for my phone number",
+"no, go back to the previous field" spoken over a confirmation.
+
+VoiceFill resolves these against **where the user has actually been**, not
+against DOM order — a field that was skipped, shown conditionally, inserted
+behind the pointer or removed with a wizard step is not "the previous field".
+The model interprets the request and returns a direction or the words the
+person used; a deterministic resolver decides which field that is, or refuses
+and asks. Going back never erases: the field is spoken back with its value
+still in it, and only an ordinary answer replaces it.
+
+Full design, the structured intents, the rules and the limitations:
+[NAVIGATION.md](./NAVIGATION.md).
+
 ## Rime's role
 
 Rime produces 100% of spoken output. Text in, audio and word timestamps out.
@@ -150,6 +168,8 @@ push-to-talk on camera, as the PRD's risk register anticipates.
 | `npm run test:bargein` | 20+ real interruptions and the barge-in scenarios; the Phase 3 exit criterion. |
 | `npm run test:intent` | The conversational intent corpus and its adversarial half, pure Node. `INTENT_LIVE=1` also scores the live model. |
 | `npm run test:intent-form` | The eight conversational demonstrations on a real form in a real browser. |
+| `npm run test:navigation` | Conversational navigation: parser, field matcher, resolver, over a simulated session. Pure Node. |
+| `npm run test:navigation-form` | The same requests on a real form: a conditional field, an inserted field, and a wizard step. |
 | `npm run test:core` | The barge-in core attacked in Node: state machine, clock, ledger, frame filter, resume table. |
 | `just stub` | Loopback WebSocket stub. Plumbing only. |
 

@@ -10,6 +10,8 @@
 //   frameFilter     stale / null / late frame decisions, by contextId
 //   TranscriptOrder in-order processing of out-of-order STT results
 //   resumePolicy    interrupted-turn kind + transcript -> what to do next
+//   parseNavigation transcript -> a structured navigation intent (no model)
+//   resolveNav      navigation intent x visit history -> the field to move to
 globalThis.VFSessionCore = (() => {
   'use strict';
 
@@ -276,6 +278,370 @@ globalThis.VFSessionCore = (() => {
     inFlightFor(fieldId) { return [...this.slots.values()].some(s => !s.settled && s.binding.fieldId === fieldId); }
   }
 
+
+  /* ------------------------------------------------------------ navigation -- */
+
+  /**
+   * Conversational navigation, the deterministic half.
+   *
+   *   parseNavigation      transcript -> a structured navigation intent, or null
+   *   matchFieldReference  "my phone number" -> the field it names, or the tie
+   *   resolveNav           intent x session history -> the field to move to
+   *
+   * Nothing here touches the DOM, and nothing here MOVES anything: resolveNav
+   * returns an index into the field list the session already holds, or a reason
+   * it will not. The model, when it is consulted at all, produces the same
+   * structured intent shape this parser does - it never names a field id, an
+   * index, or a selector, so the resolution below is the only way a target is
+   * ever chosen.
+   */
+
+  const navNorm = (s) => String(s ?? '').toLowerCase().replace(/[’]/g, "'")
+    .replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const NAV_NUM = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5,
+                    six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const navCount = (w) => (w == null ? null : (NAV_NUM[w] ?? (/^\d{1,2}$/.test(w) ? Number(w) : null)));
+
+  // Conversation that only ever introduces a request. "No no, go back" and
+  // "Don't confirm that, take me to my email" are navigation with a refusal
+  // stuck to the front; the refusal is not the instruction.
+  const NAV_LEAD = /^(?:(?:no|nope|nah|not that|wait|hang on|hold on|actually|um|uh|er|sorry|hey|ok|okay|alright|right|yeah|yep|yes|so|well|please|can you|could you|would you|will you|i want to|i wanna|i need to|i'd like to|id like to|i would like to|let's|lets|don't confirm that|dont confirm that|do not confirm that|don't confirm|cancel that|forget that|scratch that|hold off)\b[\s,.!-]*)+/;
+
+  const NAV_BACKWARD = /\b(back|backward|backwards|previous|prior|earlier|preceding)\b/;
+  const NAV_FORWARD = /\b(forward|forwards|ahead|next|onward|onwards)\b/;
+  // The words a bare relative move is allowed to be made of. Anything else in
+  // the utterance means it is an ANSWER that happens to contain "back" - a
+  // "back end developer" in an occupation field is not a navigation request.
+  const NAV_VOCAB = new Set(['go', 'goes', 'move', 'jump', 'skip', 'step', 'head', 'scroll', 'take', 'takes',
+    'bring', 'get', 'put', 'send', 'return', 'navigate', 'switch', 'revisit', 'me', 'us', 'the', 'a', 'an',
+    'to', 'up', 'over', 'by', 'and', 'then', 'just', 'now', 'again', 'please', 'lets', "let's",
+    'back', 'backward', 'backwards', 'previous', 'prior', 'earlier', 'preceding', 'last',
+    'forward', 'forwards', 'ahead', 'next', 'onward', 'onwards', 'on', 'one', 'ones',
+    'field', 'fields', 'question', 'questions', 'step', 'steps', 'entry', 'entries', 'item', 'items',
+    'change', 'that', 'this', 'it', 'answer', 'my', 'of', 'value']);
+  const CHANGE_VERB = /^(?:change|edit|fix|update|correct|amend|modify|redo|revisit|re-?do)\b/;
+
+  /**
+   * "Go back to my phone number. The last digit is wrong." - the move and the
+   * change arrive in one breath. The first clause is the navigation; whatever
+   * follows is handed to the ordinary answer path against the field moved TO,
+   * where it is extracted, written and read back exactly like a spoken value.
+   */
+  function splitNavClause(text) {
+    const s = String(text ?? '').trim();
+    const m = /^(.+?)\s*(?:[.;!?]+\s+|\s+[–—]\s+|\s+-\s+)(.+)$/.exec(s);
+    return m ? { head: m[1].trim(), rest: m[2].trim() } : { head: s, rest: '' };
+  }
+
+  // Phrases that point at a field through the conversation rather than by name.
+  // The third element is whether the phrase may stand ALONE as a navigation
+  // request. "The last one" on a choice field is the last OPTION far more often
+  // than it is the previous field, so it only navigates behind a verb ("take me
+  // back to the last one"); "the previous one" is never an option reference.
+  const NAV_REFERENCES = [
+    [/^(?:the\s+)?(?:very\s+)?(?:previous|prior|preceding)(?:\s+(?:field|one|question|step|entry|item))?$/, 'previous', true],
+    [/^(?:the\s+)?last(?:\s+(?:field|question|step|entry|item))$/, 'previous', true],
+    [/^(?:the\s+)?last\s+one$/, 'previous', false],
+    [/^(?:the\s+)?(?:field|one|question)?\s*(?:i|that i)\s+(?:just\s+)?(?:answered|entered|filled(?:\s+in)?|did|gave|said)(?:\s+(?:just\s+)?(?:before|prior to)\s+(?:this|that|it)(?:\s+one)?)?$/, 'last_answered'],
+    [/^(?:the\s+)?(?:field|one|question)\s+before\s+(?:this|the current)(?:\s+one)?$/, 'previous'],
+    [/^(?:the\s+)?(?:field|one|question)?\s*before\s+that(?:\s+one)?$/, 'before_previous'],
+    [/^(?:the\s+)?(?:field|one|question)\s+before\s+(?:my|the|our)?\s*(.+)$/, 'before_field'],
+  ];
+  // "...to the next field" / "...to the one after this" is a direction wearing
+  // the grammar of a target.
+  const NAV_FORWARD_TARGET = /^(?:the\s+)?(?:next|following)(?:\s+(?:field|one|question|step|entry|item))?$|^(?:the\s+)?(?:field|one|question)\s+after\s+(?:this|that|the current)(?:\s+one)?$/;
+
+  /**
+   * Transcript -> a structured navigation intent, or null when this is not one.
+   *
+   *   { kind:'relative',   direction:'backward'|'forward', count }
+   *   { kind:'field',      field_reference }
+   *   { kind:'referenced', reference, field_reference? }
+   *
+   * `rest` carries any trailing clause ("...and change that answer"), which the
+   * session applies to the field it lands on, never to the field it left.
+   *
+   * Deliberately narrow. The obvious commands resolve here with no model and no
+   * latency (PRD §13); everything contextual falls through to null, which is
+   * what routes the utterance to the conversational layer.
+   */
+  function parseNavigation(raw, depth = 0) {
+    const { head, rest } = splitNavClause(raw);
+    let t = navNorm(head).replace(NAV_LEAD, '').trim();
+    // "Don't confirm that. Take me back to my email." - the first sentence is
+    // the refusal and the second is the instruction.
+    const orTail = (v) => (v || depth > 2 || !rest ? v : parseNavigation(rest, depth + 1));
+    if (!t) return orTail(null);
+    const out = (nav) => ({ ...nav, rest, transcript: String(raw ?? '').trim() });
+
+    // 0. A bare referring phrase, with no verb of its own: "the one before my
+    //    email", "the field I just answered". A bare NAME is deliberately not
+    //    accepted here - "email" alone is an answer far more often than it is a
+    //    request to move.
+    const bare = navTarget(t, { bare: true });
+    if (bare && bare.kind === 'referenced') return out(bare);
+
+    // 1. A named or referred target: "...to my first name", "go to the email field".
+    const toM = /^(.*?)\b(?:to|into|at)\s+(.+)$/.exec(t);
+    if (toM) {
+      const lead = toM[1].trim();
+      // The words before "to" must be movement, or this is an answer that
+      // happens to contain the word ("send it to accounts").
+      const leadOk = !lead || lead.split(' ').every(w => NAV_VOCAB.has(w));
+      if (leadOk && (/(?:go|move|jump|take|bring|get|put|send|head|step|return|navigate|switch|revisit|back|backward|backwards|forward|next|skip)/.test(lead) || CHANGE_VERB.test(t))) {
+        const target = navTarget(toM[2]);
+        if (target) return out(target);
+      }
+    }
+
+    // 2. "change my phone number", "change what I entered for my phone number".
+    if (CHANGE_VERB.test(t)) {
+      const phrase = t.replace(CHANGE_VERB, '')
+        .replace(/^\s*(?:what|the value|the answer|the one)\s+(?:i\s+)?(?:just\s+)?(?:entered|put|gave|said|filled in|typed)\s+(?:for|in|on)?\s*/, ' ')
+        .trim();
+      const target = navTarget(phrase);
+      // "change that", "change it", "change that answer" is a correction of the
+      // field in play, not a request to move: it belongs to the answer path.
+      if (target && target.kind === 'field') return out(target);
+      if (target && target.kind === 'referenced') return out(target);
+      return orTail(null);
+    }
+
+    // 3. A bare relative move: "go back", "back two fields", "move forward one".
+    const words = t.split(' ').filter(Boolean);
+    const counts = words.map(navCount).filter(n => n !== null);
+    if (!words.every(w => NAV_VOCAB.has(w) || navCount(w) !== null)) return orTail(null);
+    const backward = NAV_BACKWARD.test(t), forward = NAV_FORWARD.test(t);
+    if (backward === forward) return orTail(null);          // neither, or both
+    // "one" is a noun as often as a number ("the previous one"); a count only
+    // counts when the utterance is not already complete without it.
+    const complete = /\b(?:the\s+)?(?:previous|prior|last|next)\s+(?:one|field|question|step)?\s*$/.test(t);
+    const count = complete ? 1 : (counts.length ? counts[counts.length - 1] : 1);
+    if (count < 1 || count > 20) return orTail(null);
+    return out({ kind: 'relative', direction: backward ? 'backward' : 'forward', count });
+  }
+
+  /** The phrase after "to" / a change verb -> a referenced or a named target. */
+  function navTarget(phrase, { bare = false } = {}) {
+    const p = navNorm(phrase).replace(/\?+$/, '').trim();
+    if (!p) return null;
+    if (!bare && NAV_FORWARD_TARGET.test(p)) return { kind: 'relative', direction: 'forward', count: 1 };
+    for (const [re, reference, bareOk = true] of NAV_REFERENCES) {
+      if (bare && !bareOk) continue;
+      const m = re.exec(p);
+      if (!m) continue;
+      if (reference === 'before_field') {
+        const anchor = cleanFieldPhrase(m[1]);
+        return anchor ? { kind: 'referenced', reference, field_reference: anchor } : null;
+      }
+      return { kind: 'referenced', reference };
+    }
+    // "that", "it", "that answer" refer to the field in play - not a move.
+    if (/^(?:that|this|it|that one|this one|that answer|the answer|that value)$/.test(p)) return null;
+    // "change the third digit", "fix the last letter": an edit of the value in
+    // play, wearing the grammar of a target. Positional editing owns those, and
+    // it is exact where a name match would be a guess.
+    if (EDIT_TARGET.test(p)) return null;
+    const ref = cleanFieldPhrase(p);
+    return ref ? { kind: 'field', field_reference: ref } : null;
+  }
+
+  const EDIT_TARGET = /\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|last|final|middle)\s+(?:\w+\s+)?(?:digits?|letters?|characters?|numbers?|words?)\b|^(?:the\s+)?(?:digits?|letters?|characters?)\b/;
+
+  /** "my first name field" -> "first name". Nouns for "field" carry no meaning. */
+  function cleanFieldPhrase(phrase) {
+    const p = navNorm(phrase)
+      .replace(/^(?:the|my|our|your|a|an)\s+/, '')
+      .replace(/\s+(?:field|question|box|input|entry|section)$/, '')
+      .replace(/\s+(?:that\s+)?i\s+(?:just\s+)?(?:entered|answered|filled(?:\s+in)?|gave|said|put|typed)$/, '')
+      .replace(/^(?:what|the value|the answer)\s+(?:i\s+)?(?:just\s+)?(?:entered|put|gave|said)\s+(?:for|in)?\s*/, '')
+      .replace(/^(?:the|my|our|your)\s+/, '')
+      .trim();
+    return p && p.length <= 60 ? p : null;
+  }
+
+  /* ------------------------------------------------- field-name resolution - */
+
+  // Ways of saying the same field. Both sides of a match are tested against the
+  // same expression, so "date of birth" finds a field labelled "Birthday" and
+  // vice versa, without either spelling being privileged.
+  const FIELD_ALIASES = [
+    ['first-name', /\b(?:first|given|fore)\s*name\b|\bfirstname\b|^first$/],
+    ['last-name', /\b(?:last|family|sur)\s*name\b|\blastname\b|\bsurname\b|^last$/],
+    ['middle-name', /\bmiddle\s*(?:name|initial)\b/],
+    ['full-name', /\b(?:full|whole|complete)\s*name\b|^name$|^your name$/],
+    ['email', /\be-?\s?mail\b/],
+    ['phone', /\b(?:phone|telephone|mobile|cell|cellphone|contact number)\b/],
+    ['address', /\b(?:address|street)\b/],
+    ['city', /\b(?:city|town|suburb)\b/],
+    ['state', /\b(?:state|province|region|county)\b/],
+    ['zip', /\b(?:zip|postal|postcode|post code|pin code|pincode)\b/],
+    ['country', /\bcountry\b/],
+    ['dob', /\b(?:date of birth|birth\s?date|birthday|dob)\b/],
+    ['age', /\bage\b/],
+    ['company', /\b(?:company|employer|organisation|organization|business)\b/],
+    ['website', /\b(?:website|web site|url|homepage)\b/],
+    ['password', /\b(?:password|passcode)\b/],
+  ];
+  const NAV_STOPWORDS = new Set(['the', 'my', 'a', 'an', 'of', 'for', 'your', 'our', 'is', 'please', 'to']);
+  const navWords = (s) => navNorm(s).split(' ').filter(w => w && !NAV_STOPWORDS.has(w));
+  const aliasGroups = (s) => FIELD_ALIASES.filter(([, re]) => re.test(navNorm(s))).map(([g]) => g);
+
+  /**
+   * A spoken field reference against the fields this session actually holds.
+   *
+   * Returns { best, score, candidates } - candidates being every field within a
+   * hair of the best, which is what makes "my name" on a form with a first and
+   * a last name a QUESTION rather than a coin flip.
+   */
+  function matchFieldReference(phrase, fields = []) {
+    const p = navNorm(phrase);
+    const pw = navWords(p);
+    if (!p || !fields.length) return { best: null, score: 0, candidates: [] };
+    const pg = aliasGroups(p);
+    const scored = fields.map((f) => {
+      const label = navNorm(f.label || '');
+      const name = navNorm(String(f.name || '').replace(/[_\-.]+/g, ' '));
+      const hay = `${label} ${name}`.trim();
+      if (!hay) return { f, s: 0, rank: 0 };
+      let s = 0;
+      const hg = aliasGroups(hay);
+      if (label === p || name === p) s = 1;
+      else {
+        const hw = new Set(navWords(hay));
+        if (pw.length && pw.every(w => hw.has(w))) s = 0.85;
+        if (pg.length && hg.some(g => pg.includes(g))) s = Math.max(s, 0.8);
+        if (!s && pw.length) {
+          const hit = pw.filter(w => hw.has(w)).length;
+          s = 0.55 * (hit / pw.length);
+        }
+      }
+      // "My address" over "Street address" and "Email address": both contain
+      // the word, but one of them is ALSO an email, and the person did not say
+      // email. A kind the reference never mentioned costs the match, so the
+      // plain one wins outright instead of the pair being an unanswerable tie.
+      const extra = pg.length ? hg.filter(g => !pg.includes(g)).length : 0;
+      return { f, s, rank: s - 0.15 * extra };
+    }).sort((a, b) => b.rank - a.rank);
+    const best = scored[0];
+    if (!best || best.s < 0.6) return { best: null, score: best ? best.s : 0, candidates: [] };
+    const candidates = scored.filter(x => x.rank >= best.rank - 0.1 && x.s >= 0.6).map(x => x.f);
+    return { best: best.f, score: best.s, candidates };
+  }
+
+  /* --------------------------------------------------------- nav resolution */
+
+  /**
+   * A navigation intent x the session's own history -> the field to move to.
+   *
+   * `ctx` is the session's truth and nothing else:
+   *   fields    the fields reachable RIGHT NOW (this step, this DOM)
+   *   index     where the session is
+   *   trail     field ids in the order the user actually met them
+   *   answered  fieldId -> true
+   *   labels    fieldId -> label, for fields seen earlier in the session
+   *
+   * "The previous field" is the previous entry in `trail`, not index - 1: a
+   * field that was skipped, conditionally shown, or inserted by the page after
+   * the user passed it is not somewhere they have been.
+   *
+   * Never guesses. Every refusal names why, and the caller asks.
+   */
+  function resolveNav(nav, ctx) {
+    const fields = ctx.fields || [];
+    const trail = ctx.trail || [];
+    const labels = ctx.labels || {};
+    const answered = ctx.answered || {};
+    if (!nav) return { ok: false, reason: 'no-intent' };
+    if (!fields.length) return { ok: false, reason: 'no-fields' };
+
+    const has = (id) => fields.some(f => f.id === id);
+    const at = (id) => fields.findIndex(f => f.id === id);
+    const found = (i, why) => ({ ok: true, index: i, field: fields[i], why });
+    // The visit history, oldest first, once per field, minus anything the page
+    // has since taken away (a previous wizard step, a collapsed branch).
+    const path = [];
+    for (const id of trail) if (has(id) && !path.includes(id)) path.push(id);
+    const currentId = fields[ctx.index]?.id ?? null;
+    const pos = currentId === null ? -1 : path.indexOf(currentId);
+    const before = pos >= 0 ? path.slice(0, pos) : [];
+
+    const backTo = (n) => {
+      // No history to walk (a fresh session, or every earlier field is gone):
+      // form order is the honest fallback, and it is what the user sees.
+      if (pos < 0) {
+        const i = ctx.index - n;
+        if (i < 0) return { ok: false, edge: 'start', available: Math.max(0, ctx.index) };
+        return found(i, 'form-order');
+      }
+      if (n > before.length) return { ok: false, edge: 'start', available: before.length };
+      return found(at(before[before.length - n]), 'history');
+    };
+    const fwdTo = (n) => {
+      const i = ctx.index + n;
+      if (i >= fields.length) return { ok: false, edge: 'end', available: Math.max(0, fields.length - 1 - ctx.index) };
+      return found(i, 'form-order');
+    };
+
+    switch (nav.kind) {
+      case 'relative': {
+        const n = Number(nav.count) || 1;
+        if (!Number.isInteger(n) || n < 1 || n > 20) return { ok: false, reason: 'count-out-of-range' };
+        return nav.direction === 'forward' ? fwdTo(n) : backTo(n);
+      }
+
+      case 'referenced': {
+        switch (nav.reference) {
+          case 'previous': return backTo(1);
+          case 'before_previous': return backTo(2);
+          case 'last_answered': {
+            for (let i = before.length - 1; i >= 0; i--) if (answered[before[i]]) return found(at(before[i]), 'history');
+            return { ok: false, reason: 'nothing-answered' };
+          }
+          case 'before_field': {
+            const anchor = resolveTarget(nav.field_reference, fields, labels);
+            if (!anchor.ok) return anchor;
+            // Before it in the user's own path where that is known, in form
+            // order otherwise - a field they have not reached has no history.
+            const ap = path.indexOf(anchor.field.id);
+            if (ap > 0) return found(at(path[ap - 1]), 'history');
+            const ai = at(anchor.field.id);
+            if (ai > 0) return found(ai - 1, 'form-order');
+            return { ok: false, edge: 'start', available: 0 };
+          }
+          default: return { ok: false, reason: 'unknown-reference' };
+        }
+      }
+
+      case 'field': {
+        const r = resolveTarget(nav.field_reference, fields, labels);
+        if (!r.ok) return r;
+        return found(at(r.field.id), 'named');
+      }
+
+      default: return { ok: false, reason: 'unknown-kind' };
+    }
+  }
+
+  /** A field reference -> exactly one reachable field, or the reason it is not. */
+  function resolveTarget(reference, fields, labels) {
+    const ref = String(reference ?? '').trim();
+    if (!ref) return { ok: false, reason: 'no-reference' };
+    const m = matchFieldReference(ref, fields);
+    if (m.best && m.candidates.length === 1) return { ok: true, field: m.best };
+    if (m.candidates.length > 1) return { ok: false, reason: 'ambiguous', candidates: m.candidates };
+    // Known to the session but not on the page any more: a previous step of a
+    // multi-step form, or a branch that closed. Saying so is the honest answer;
+    // guessing at the nearest visible field is not.
+    const gone = Object.entries(labels)
+      .filter(([id]) => !fields.some(f => f.id === id))
+      .map(([id, label]) => ({ id, label }));
+    const g = gone.length ? matchFieldReference(ref, gone) : { best: null };
+    if (g.best) return { ok: false, reason: 'off-step', label: g.best.label };
+    return { ok: false, reason: 'no-such-field' };
+  }
+
   /* --------------------------------------------------------- resume table -- */
 
   /**
@@ -322,12 +688,29 @@ globalThis.VFSessionCore = (() => {
     //    since navigated away from, is not acted on: their later instruction wins.
     if (binding && binding.epoch !== ctx.epoch) return { action: 'drop', reason: 'stale-epoch' };
     const cmd = deps.parseCommand(text);
-    if (binding && binding.fieldId && field && binding.fieldId !== field.id && !cmd) {
+    // A navigation request is about the SESSION, not about the field it was
+    // spoken at, so - like a command - it survives the pointer having moved.
+    const nav = parseNavigation(text);
+    if (binding && binding.fieldId && field && binding.fieldId !== field.id && !cmd && !nav) {
       return { action: 'drop', reason: 'superseded' };
     }
     if (!text) {
       if (retracted && pending) return { action: 'reject', retracted: true };
       return { action: 'unusable', ex: { value: null, note: 'empty transcript' } };
+    }
+
+    // 1b. Navigation OUTRANKS the confirmation flow (PRD navigation §6). "No,
+    //     go back to the previous field" into a read-back is a request to move,
+    //     not a rejection of the value: the value was written before it was read
+    //     back, so leaving the confirmation unanswered loses nothing, and the
+    //     user can correct it when they come back to it.
+    if (nav) {
+      // The two moves the command grammar already had stay commands - same fast
+      // path, same metrics - and runCommand resolves them through the history.
+      if (nav.kind === 'relative' && nav.count === 1 && !nav.rest) {
+        return { action: 'command', command: nav.direction === 'forward' ? 'next' : 'previous', nav };
+      }
+      return { action: 'navigate', nav };
     }
     if (retracted && pending && field) {
       // "Scratch that, it's Arnav" straight into the read-back: the new value.
@@ -461,5 +844,6 @@ globalThis.VFSessionCore = (() => {
     PlaybackClock, heardWords, heardDisplay, isPauseToken,
     Ledger, chunkDecision, TranscriptOrder,
     resumePolicy, optionsHeard,
+    parseNavigation, matchFieldReference, resolveNav, splitNavClause, FIELD_ALIASES,
   };
 })();

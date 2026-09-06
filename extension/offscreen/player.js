@@ -161,6 +161,15 @@ const S = {
   attempts: {},
   filled: {},
   answered: {},               // fieldId -> true once a transcript produced a value for it
+  // Conversational navigation. The trail is the user's OWN path through the
+  // form - where they have actually been, in order - which is what "the
+  // previous field" means once fields have been skipped, shown conditionally,
+  // inserted by the page, or taken away with a step. `labels` remembers the
+  // name of every field seen this session, including ones no longer in the
+  // DOM, so a request to go back to one can be answered honestly.
+  trail: [],
+  labels: {},
+  lastNav: null,
   lastTranscript: null,
   lastStt: null,
 
@@ -1124,6 +1133,10 @@ async function consultIntent(decision, ctx, binding) {
     interrupted: !!binding.interrupted && !!ctx.heardText,
     state: S.state, turnId: S.turnId, epoch: S.epoch, ledger: S.ledger.last(6),
     profile: S.profile,
+    // Names only. The model needs to know a "phone number" exists to interpret
+    // a request to go to it; it never sees an id, and what it returns is a
+    // reference in the user's own words that resolveNav then resolves.
+    fields: S.fields, answered: S.answered, index: S.index,
   }, {
     optionsHeard: C.optionsHeard,
     stillCurrent: () => stillCurrent(binding, ctx.field, pendingKey),
@@ -1191,6 +1204,12 @@ async function processTranscript(binding, transcript) {
 
     case 'command':
       return { ...base, ...(await runCommand(decision.command, transcript)) };
+
+    // A request to move. The interpretation is the model's or the parser's;
+    // WHICH field it turns out to be is the session's, decided against the
+    // fields it holds and the path the user actually took.
+    case 'navigate':
+      return { ...base, ...(await navigate(decision.nav, { transcript })) };
 
     case 'accept': {
       const p = S.pending;
@@ -1338,14 +1357,142 @@ async function failAttempt(field, note, transcript) {
   return { ok: false, error: note, transcript, attempts: S.attempts[field.id] };
 }
 
+/* ------------------------------------------------------------ navigation - */
+
+/**
+ * Record that the user has actually BEEN at this field.
+ *
+ * The DOM order is what the form looks like; this is what the conversation did.
+ * A field the page inserted behind them, or one a branch never showed, is not
+ * somewhere they can be sent "back" to.
+ */
+function visit(i) {
+  const f = S.fields[i];
+  if (!f) return;
+  S.labels[f.id] = f.label || f.id;
+  if (S.trail[S.trail.length - 1] !== f.id) S.trail.push(f.id);
+  if (S.trail.length > 200) S.trail.shift();
+}
+
+/**
+ * Execute a navigation intent. The intent says WHERE, in the vocabulary of
+ * direction and reference; resolveNav - deterministic, in session-core - says
+ * which field that is, or refuses. Nothing here can be told a field id, an
+ * index or a selector by anything outside the session.
+ *
+ * Going back never erases: the value is left where it is, spoken back on
+ * arrival, and only an ordinary answer replaces it.
+ */
+async function navigate(nav, { why = 'nav', transcript = '' } = {}) {
+  const C = CORE();
+  const r = C.resolveNav(nav, { fields: S.fields, index: S.index, trail: S.trail,
+                                answered: S.answered, labels: S.labels });
+  S.lastNav = { nav, ok: !!r.ok, why: r.why || r.reason || r.edge || null, at: Date.now() };
+  if (!r.ok) return navRefusal(r, nav);
+
+  // An outstanding read-back is abandoned rather than answered. The value it
+  // was about was written to the page before it was ever spoken, so it stays
+  // there for the user to review when they come back to it.
+  //
+  // The learning chain ends here whether or not there was one: what the
+  // recogniser produced for the field being LEFT is no longer evidence about
+  // anything the user is about to accept somewhere else.
+  if (S.pending) S.pending = null;
+  S.learn = null;
+  const from = S.index;
+  S.index = r.index;
+  visit(S.index);
+  const f = r.field;
+  S.attempts[f.id] = 0;                       // an explicit return is a fresh start
+  const cur = S.filled[f.id];
+  const hasValue = cur !== undefined && cur !== null && String(cur) !== '';
+  const base = { ok: true, navigated: true, from, index: S.index, fieldId: f.id, via: r.why, kept: hasValue ? cur : null };
+
+  // "Go back to my phone number. The last digit is wrong." / a value the model
+  // read out of the same breath. It is extracted, shaped and READ BACK against
+  // the field landed on, exactly like a value spoken at it - never written on
+  // the model's say-so, and never applied to the field being left.
+  const follow = (typeof nav.correction === 'string' && nav.correction) || nav.rest || '';
+  const ex = follow ? followValue(f, follow) : null;
+  // Straight to the write and its read-back. Announcing the move first would
+  // put the machine in PROMPTING and make the write that follows the one
+  // transition the dialog machine forbids - asking and writing at once - and
+  // the read-back names the value anyway.
+  if (ex) return { ...base, ...(await fillAndConfirm(f, intentOf(f), ex, follow)), corrected: true };
+
+  if (hasValue) {
+    const flat = Array.isArray(cur) ? cur.join(', ') : String(cur);
+    const spoken = NORM().toSpeech(flat, intentOf(f)) || flat;
+    await speak(`${f.label || 'That field'} currently has ${pauseToken(200)}${spoken}.`,
+                { kind: 'info', fieldId: f.id, why: 'nav', interrupt: true });
+  }
+  const p = await speakCurrent({ why: why === 'previous' || why === 'next' ? why : 'nav', interrupt: !hasValue });
+  return { ...base, prompt: p.prompt, field: p.field };
+}
+
+/**
+ * A trailing clause -> a value this field can hold, or null.
+ *
+ * The interpretation lives in the layer (VFIntent.followValue), so a value
+ * arriving with a move goes through the same personalisation, extraction and
+ * shape check as one spoken at the field - and one implementation is what the
+ * Node corpus exercises.
+ */
+function followValue(field, text) {
+  const I = INTENT();
+  if (!I) return null;
+  return I.followValue(text, {
+    intent: intentOf(field),
+    options: field.options || [],
+    currentValue: S.filled[field.id] ?? null,
+  });
+}
+
+/** A navigation that cannot be carried out safely: say why, ask, move nothing. */
+async function navRefusal(r, nav) {
+  const fieldId = currentField()?.id ?? null;
+  const plural = (n) => (n === 1 ? '' : 's');
+  if (r.edge) {
+    const text = r.edge === 'start'
+      ? (r.available ? `I can only go back ${r.available} field${plural(r.available)} from here.` : 'That was the first field.')
+      : (r.available ? `There ${r.available === 1 ? 'is' : 'are'} only ${r.available} field${plural(r.available)} after this one.` : 'That was the last field.');
+    await speak(text, { kind: 'info', fieldId, why: 'nav-edge', interrupt: true });
+    return { ok: true, navigated: false, edge: r.edge, index: S.index, available: r.available };
+  }
+  const q = navQuestion(r, nav);
+  await speak(q, { kind: 'prompt', fieldId, why: 'clarify', interrupt: true });
+  return { ok: false, navigated: false, clarifying: true, question: q, reason: r.reason, index: S.index };
+}
+
+function navQuestion(r, nav) {
+  const names = (r.candidates || []).map(f => f.label).filter(Boolean).slice(0, 3);
+  switch (r.reason) {
+    case 'ambiguous':
+      return names.length > 1
+        ? `I have ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}. ${pauseToken(300)}Which one did you mean?`
+        : 'Which field did you mean?';
+    case 'off-step':
+      return `${r.label} is not on this part of the form any more. ${pauseToken(300)}Which field did you mean?`;
+    case 'nothing-answered':
+      return 'You have not answered anything yet. Which field would you like?';
+    case 'no-such-field':
+      return `I do not have a field for ${String(nav?.field_reference || 'that').slice(0, 40)}. ${pauseToken(300)}Which one did you mean?`;
+    default:
+      return 'Which field would you like to go to?';
+  }
+}
+
 /* ---------------------------------------------------------- commands F2.6 */
 
 async function runCommand(command, transcript) {
   const field = currentField();
   switch (command) {
     case 'repeat':   await speakCurrent({ why: 'repeat' }); return { ok: true, command };
-    case 'next':     return { command, ...(await move(+1, 'next')) };
-    case 'previous': return { command, ...(await move(-1, 'previous')) };
+    // Both go through the same resolver a spoken request does, so "next" and
+    // "go back" mean exactly what "move forward one" and "the previous field"
+    // mean - the visit history, not DOM index arithmetic.
+    case 'next':     return { command, ...(await navigate({ kind: 'relative', direction: 'forward', count: 1 }, { why: 'next' })) };
+    case 'previous': return { command, ...(await navigate({ kind: 'relative', direction: 'backward', count: 1 }, { why: 'previous' })) };
     case 'stop':     Q.length = 0; abortWaits(); stopAudio('command'); S.pending = null;
                      await speak('Stopped.', { kind: 'info', why: 'stop' }); return { ok: true, command };
     case 'skip':
@@ -1415,6 +1562,8 @@ async function sessionStart({ fields, tabId, backend, speakSummary = true, profi
   S.contextsSeen = {};
   S.pending = null; S.attempts = {}; S.filled = {}; S.answered = {}; S.lastTranscript = null; S.lastStt = null;
   S.learn = null;
+  S.trail = []; S.labels = {}; S.lastNav = null;
+  visit(S.index);
   S.reconnect.attempts = 0;
 
   const ok = await connect();
@@ -1439,6 +1588,7 @@ async function move(delta, why = 'nav') {
   if (next < 0) { await speak('That was the first field.', { kind: 'info', why }); return { ok: true, index: S.index, edge: 'start' }; }
   if (next >= S.fields.length) { await speak('That was the last field.', { kind: 'info', why }); return { ok: true, index: S.index, edge: 'end' }; }
   S.index = next;
+  visit(S.index);
   const r = await speakCurrent({ why: ['accepted', 'filled', 'invalid-skip', 'failed-skip'].includes(why) ? 'nav' : why });
   return { ok: true, index: S.index, prompt: r.prompt, field: r.field };
 }
@@ -1454,6 +1604,11 @@ function updateFields(fields) {
   } else if (S.fields.length && S.index < 0) {
     S.index = 0;
   }
+  // A field the page has just shown (a conditional branch, the next step of a
+  // wizard) is named for the first time here; one it has taken away keeps the
+  // name it had, so "go back to my email" can say where the email went.
+  for (const f of S.fields) S.labels[f.id] = f.label || f.id;
+  visit(S.index);
   return { ok: true, before, after: S.fields.length, index: S.index, keptPointer: !!prevId && S.fields.some(f => f.id === prevId) };
 }
 
@@ -1464,6 +1619,7 @@ function stopSession() {
   try { if (S.micMode === 'ptt') STT().releaseMic(); } catch {}
   S.order.abandonAll('session-stop');
   S.listening = false; S.ptt = null; S.openBinding = null; S.pending = null; S.learn = null;
+  S.trail = []; S.labels = {}; S.lastNav = null;
   S.epoch += 1;
   S.index = -1; S.fields = [];
   if (S.reconnect.timer) { clearTimeout(S.reconnect.timer); S.reconnect.timer = null; }
@@ -1495,6 +1651,9 @@ function snapshot() {
     pending: S.pending ? { display: S.pending.display, intent: S.pending.intent, fieldId: S.pending.fieldId, value: S.pending.value, spoken: S.pending.spoken } : null,
     lastTranscript: S.lastTranscript, lastSttError: S.lastStt?.error ?? null, lastSttMs: S.lastStt?.ms ?? null, lastSttSeconds: S.lastStt?.seconds ?? null,
     attempts: S.attempts, filled: S.filled, filledCount: Object.keys(S.filled).length, answered: S.answered,
+    // The user's own path through the form, and the last navigation decided on
+    // it - the evidence for why "the previous field" was the field it was.
+    trail: S.trail.slice(-24), lastNav: S.lastNav,
     queue: Q.length, capturesInFlight: S.order.pendingCount, capturesSwept: S.order.swept,
     machine: { state: S.state, illegal: S.machine.illegal, illegalCount: S.machine.illegalCount, history: S.machine.history.slice(-12) },
     ledger: S.ledger.last(14),
@@ -1560,8 +1719,11 @@ chrome.runtime.onMessage.addListener((msg, _s, respond) => {
           if (msg.profile !== undefined) setProfile(msg.profile);
           respond({ ok: true, profile: S.profile });
           break;
-        case 'OFF_NEXT':           respond(await move(+1, 'next')); break;
-        case 'OFF_PREV':           respond(await move(-1, 'previous')); break;
+        case 'OFF_NEXT':           respond(await navigate({ kind: 'relative', direction: 'forward', count: 1 }, { why: 'next' })); break;
+        case 'OFF_PREV':           respond(await navigate({ kind: 'relative', direction: 'backward', count: 1 }, { why: 'previous' })); break;
+        // The harness's programmatic navigation, on the same resolver a spoken
+        // request uses: { kind, direction, count } | { kind:'field', ... }.
+        case 'OFF_NAVIGATE':       respond(await navigate(msg.nav || {}, { why: 'nav' })); break;
         case 'OFF_REPEAT':         respond(await speakCurrent({ why: 'repeat' })); break;
         case 'OFF_SPEAK':          respond(await speak(msg.text, { kind: msg.kind || 'info', why: 'manual' })); break;
         case 'OFF_UPDATE_FIELDS':  respond(updateFields(msg.fields)); break;

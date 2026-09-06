@@ -150,6 +150,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         case 'VF_NEXT':    sendResponse(await toOffscreen({ type: 'OFF_NEXT' })); break;
         case 'VF_PREV':    sendResponse(await toOffscreen({ type: 'OFF_PREV' })); break;
+        // A structured navigation intent - direction/count or a spoken field
+        // reference. Never a selector: the offscreen session resolves it.
+        case 'VF_NAVIGATE': sendResponse(await toOffscreen({ type: 'OFF_NAVIGATE', nav: msg.nav })); break;
         case 'VF_REPEAT':  sendResponse(await toOffscreen({ type: 'OFF_REPEAT' })); break;
         case 'VF_STATE':   sendResponse(await toOffscreen({ type: 'OFF_STATE' })); break;
 

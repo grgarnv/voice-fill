@@ -65,7 +65,12 @@ export const INTENT_SCHEMA = {
     intent: {
       type: 'string',
       enum: ['ANSWER_FIELD', 'SELECT_OPTIONS', 'CORRECT_VALUE', 'ACCEPT_CONFIRMATION',
-             'REJECT_CONFIRMATION', 'REPEAT', 'SKIP', 'GO_BACK', 'NEXT', 'REQUEST_CLARIFICATION'],
+             'REJECT_CONFIRMATION', 'REPEAT', 'SKIP', 'GO_BACK', 'NEXT', 'REQUEST_CLARIFICATION',
+             // Navigation names a direction or a reference. It never names a
+             // field id, an index into the DOM, or a control: the assistant
+             // resolves the reference against its own visit history.
+             'NAVIGATE_PREVIOUS', 'NAVIGATE_NEXT', 'NAVIGATE_RELATIVE',
+             'NAVIGATE_TO_FIELD', 'NAVIGATE_TO_REFERENCED_FIELD'],
     },
     field_id: { type: ['string', 'null'], description: 'Echo the active field id from the context, exactly.' },
     // Echoed so the validator can catch a provider that crossed two concurrent
@@ -120,6 +125,27 @@ export const INTENT_SCHEMA = {
           type: ['string', 'null'],
           description: 'For REQUEST_CLARIFICATION: one short spoken question, under 15 words.',
         },
+        direction: {
+          type: ['string', 'null'], enum: ['backward', 'forward', null],
+          description: 'For NAVIGATE_RELATIVE: which way through the form.',
+        },
+        count: {
+          type: ['integer', 'null'], minimum: 1, maximum: 20,
+          description: 'For NAVIGATE_RELATIVE: how many fields to move. 1 unless they said a number.',
+        },
+        field_reference: {
+          type: ['string', 'null'],
+          description: 'For NAVIGATE_TO_FIELD (and NAVIGATE_TO_REFERENCED_FIELD with reference "before_field"): '
+            + 'the field the person named, in their own words ("phone number", "date of birth"). '
+            + 'Never an id, an index, or a selector - the assistant matches these words to its own fields.',
+        },
+        reference: {
+          type: ['string', 'null'],
+          enum: ['previous', 'before_previous', 'last_answered', 'before_field', null],
+          description: 'For NAVIGATE_TO_REFERENCED_FIELD: which field they pointed at through the conversation. '
+            + 'previous = the one before this. before_previous = "the one before that". '
+            + 'last_answered = "the field I just answered". before_field = the one before the field named in field_reference.',
+        },
       },
     },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -143,6 +169,16 @@ Interpreting:
 - A bare agreement ("yes", "that's right", "perfect") is ACCEPT_CONFIRMATION; a bare disagreement ("no", "that's wrong") is REJECT_CONFIRMATION. A disagreement that also carries the right answer is CORRECT_VALUE. Both require pending_confirmation to be non-null - there is nothing to accept or reject otherwise, and the correct answer is REQUEST_CLARIFICATION.
 - Values must fit the field: digit fields take digits only, dates are YYYY-MM-DD, times are 24-hour HH:MM, a choice field's value must be an option's exact label.
 - The newest thing the person said supersedes anything earlier in the conversation.
+
+Navigating the form:
+- People move around a form in conversation: "go back", "go back two fields", "take me back to my email", "the one before that", "I want to change what I entered for my phone number". These are NAVIGATE intents, not answers and not corrections.
+- "form_fields" is the form as the assistant holds it. A named field must be one of those labels; if the person names something that is not there, return REQUEST_CLARIFICATION rather than the nearest-looking field.
+- You do not choose a field. NAVIGATE_TO_FIELD carries "field_reference" - the words the person used - and the assistant matches them against its own fields and its record of where the person has been. Never return a position, an index, or an id.
+- A reference into the conversation is NAVIGATE_TO_REFERENCED_FIELD: "the previous one" is previous, "the one before that" is before_previous, "the field I just answered" is last_answered, "the one before my email" is before_field with field_reference "email".
+- Simple counts are NAVIGATE_RELATIVE with direction and count: "go back two fields" is backward 2, "move forward one" is forward 1.
+- A navigation spoken into a read-back is still a navigation. "No, go back to the previous field" and "Don't confirm that, take me to my email" are NAVIGATE intents, not REJECT_CONFIRMATION - the person is moving, not answering the question.
+- "field_id" always echoes the ACTIVE field from the context, even when you are asking to move somewhere else. The field you want to move to goes in "field_reference", in the person's own words - never in field_id.
+- A move can carry a correction: "Take me back to my name - it's actually Arnav" is NAVIGATE_TO_FIELD with field_reference "name" and value "Arnav". Put the value in "value" only when they actually said the new value; "the last digit is wrong" names no value, so send the navigation alone.
 
 Spelling and capitalisation are structure, not text:
 - When someone spells something out ("Arnav is A R N A V and Garg is G A R G"), put the words in "value" as they said them and the letters in "spelling", one entry per spelled word. Never write the letters into "value", never write them separated by spaces or dashes, and never repeat the value once for the words and once for the spelling. That utterance is value "Arnav Garg" with spelling [{word:"Arnav",letters:["A","R","N","A","V"]},{word:"Garg",letters:["G","A","R","G"]}].

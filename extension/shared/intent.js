@@ -28,6 +28,9 @@ globalThis.VFIntent = (() => {
   // the layer must still work if memory.js is not loaded, so every use is
   // guarded rather than assumed.
   const MEM = () => globalThis.VFMemory || null;
+  // The deterministic core, for the one thing the router needs from it: whether
+  // a spoken field reference matches a field this session actually holds.
+  const CORE = () => globalThis.VFSessionCore || null;
 
   // Only intents whose value is a bare digit string can be length-compared, and
   // that comparison is what catches a partial correction being read as a whole
@@ -309,6 +312,45 @@ globalThis.VFIntent = (() => {
     };
   }
 
+  /* ------------------------------------------------- a value riding along -- */
+
+  // The conversation that carries a value into a navigation: "...it's actually
+  // Arnav", "...make it Arnav". Repeated, so a stack of lead-ins comes off.
+  const FOLLOW_LEAD = /^\s*(?:(?:no|nope|nah|wait|actually|and|but|oh|um|uh|sorry|please|it'?s|it is|its|make it|make that|change it to|change that to|set it to|should be|i said|i meant|put|use|try)\b[\s,.!-]*)+/i;
+  // An INSTRUCTION is not a value. "...and change that answer" names nothing to
+  // write, and fromSpeech would take the words themselves as the value.
+  const FOLLOW_INSTRUCTION = /^(?:change|fix|update|edit|correct|redo|amend|modify|do)\b/i;
+  // What is left of "change that answer" once the retraction stripper has taken
+  // "change that" off it. A noun standing in for the value is not the value:
+  // without this the field is filled with the word "answer".
+  const FOLLOW_NOT_A_VALUE = /^(?:the\s+)?(?:answer|value|entry|response|one|thing|it|that|this)\s*[.!]*$/i;
+
+  /**
+   * The clause that rides along with a move ("go back to my name - it's
+   * A R N A V") -> a value that field can hold, or null.
+   *
+   * The same three steps a spoken answer gets, in the same order: personal
+   * spelling and casing first, then ordinary extraction, then the shape check.
+   * Nothing here writes anything - the caller reads the result back before it
+   * counts, exactly as it does for a value spoken at the field.
+   */
+  function followValue(text, { intent, options = [], currentValue = null } = {}) {
+    const K = CORE(), M = MEM(), N = globalThis.VFNormalize;
+    if (!N) return null;
+    const raw = String(text || '');
+    const stripped = K ? K.stripRetraction(raw) : { retracted: false, rest: raw };
+    const t = (stripped.retracted ? stripped.rest : raw).replace(FOLLOW_LEAD, '').trim();
+    if (!t || FOLLOW_INSTRUCTION.test(t) || FOLLOW_NOT_A_VALUE.test(t)) return null;
+    if (M) {
+      const built = M.resolveUtterance(t, { intent, currentValue });
+      if (built?.value) { const ex = shapeValue(built.value, intent, options); if (ex) return ex; }
+      if (built?.clarify) return null;               // ask on arrival, write nothing
+    }
+    const ex = N.fromSpeech(t, { options }, intent);
+    if (ex.value === null || ex.value === undefined || ex.ambiguous) return null;
+    return shapeValue(ex.value, intent, options);
+  }
+
   /* -------------------------------------------------------------- router -- */
 
   // Language that only means something relative to what was just said. These
@@ -326,6 +368,12 @@ globalThis.VFIntent = (() => {
   // it. Its absence is what routes an ambiguous read-back reply to the provider.
   const CORRECTION_MARKER = /^\s*(?:nope|no|nah|wrong|incorrect|not right|scratch|strike|forget|cancel|actually|i meant|i mean|change|make it|make that|should be|it'?s|its|use|try|put)\b/i;
   const PARTIAL_EDIT = /\b(digit|letter|character|number)\b.*\b(is|should be|to)\b|\b(last|first|second|third|fourth|middle|final)\s+(digit|letter|character|number|one|word|name)\b|\breplace\b|\bchange\b|\bmake (it|that)\b/i;
+  // Language that is asking to MOVE. Only ever a route: the deterministic
+  // parser has already had its turn by the time this is tested, so a hit here
+  // means the phrasing looks navigational and did NOT resolve - which is
+  // exactly the contextual case the model is for ("the one I answered before
+  // this", "change what I entered for my phone number").
+  const NAVIGATION = /\b(?:go|take me|bring me|get me|put me|move|jump|head|scroll|switch)\s+(?:me\s+)?(?:back|forward|to|into|over)\b|\b(?:previous|next|last|prior)\s+(?:field|question|one|step)\b|\bone before\b|\bfield i (?:just )?(?:answered|entered|filled)\b|\bchange (?:what|the|my)\b.*\b(?:entered|answered|filled|put)\b|\bgo back\b|\btake me back\b/i;
 
   /**
    * Should the conversational provider see this transcript at all?
@@ -346,6 +394,7 @@ globalThis.VFIntent = (() => {
     const tags = {
       referential: isChoice && options.length && RELATIVE.test(transcript),
       exclusion: isChoice && options.length && EXCLUSION.test(transcript),
+      navigational: NAVIGATION.test(transcript),
     };
     const yes = (why) => ({ consult: true, why, ...tags });
     const no = (why) => ({ consult: false, why, ...tags });
@@ -353,6 +402,21 @@ globalThis.VFIntent = (() => {
     // A stale or superseded transcript must never reach a model: acting on it
     // later is exactly the failure the turn machinery exists to prevent.
     if (decision.action === 'drop') return no('dropped');
+    // The navigation the parser already resolved. "Go back", "next field",
+    // "go back two fields", "take me back to my email" cost no model call and
+    // no latency (PRD §13). A NAMED target the matcher cannot find is the
+    // exception: the words may be a phrasing it missed rather than a field the
+    // form does not have, and that is what the layer is for. An AMBIGUOUS one
+    // is not sent - two fields matching equally well is a question for the
+    // person, not a choice for a model.
+    if (decision.action === 'navigate') {
+      const K = CORE(), nav = decision.nav || {};
+      if (nav.kind === 'field' && K && (ctx.fields || []).length) {
+        const m = K.matchFieldReference(nav.field_reference, ctx.fields);
+        if (!m.best) return yes('navigation-unresolved');
+      }
+      return no('deterministic-navigation');
+    }
     // Passwords never leave the machine, whatever the interpretation would gain.
     if (field.type === 'password' || intent === 'password') return no('sensitive-field');
 
@@ -425,6 +489,15 @@ globalThis.VFIntent = (() => {
       return yes('partial-edit-on-answer');
     }
 
+    // 5. Navigation the parser could not resolve - a field named in a way the
+    //    matcher missed, or a reference into the conversation. Whatever comes
+    //    back is still resolved against the session's own history, so the model
+    //    widens the LANGUAGE understood and nothing else.
+    //    Commands are excluded: those already moved.
+    if (tags.navigational && !['command', 'navigate', 'drop'].includes(decision.action)) {
+      return yes('navigation-language');
+    }
+
     return no(`deterministic-${decision.action}`);
   }
 
@@ -441,7 +514,8 @@ globalThis.VFIntent = (() => {
    */
   function buildContext(ctx) {
     const { field, intent, options = [], heardOptionValues = [], pending, transcript,
-            state, turnId, epoch, ledger = [], interrupted, profile = null } = ctx;
+            state, turnId, epoch, ledger = [], interrupted, profile = null,
+            fields = [], answered = {}, index = -1 } = ctx;
     const heard = new Set(heardOptionValues.map(String));
     // Personal vocabulary this person has already confirmed for this KIND of
     // field. A hint, nothing more: the value the model returns is validated
@@ -463,6 +537,16 @@ globalThis.VFIntent = (() => {
       options: options.slice(0, 40).map((o, i) => ({
         index: i + 1, label: String(o.text || '').slice(0, 120), heard: heard.has(String(o.value)),
       })),
+      // The form, as a list of NAMES - so a navigation request can be matched
+      // to something that exists rather than invented. There are no ids, no
+      // selectors and no values here: the model returns the words the person
+      // used, and the session decides which field that is.
+      ...(fields.length ? {
+        form_fields: fields.slice(0, 40).map((f, i) => ({
+          position: i + 1, label: String(f.label || '').slice(0, 80),
+          answered: !!answered[f.id], current: i === index,
+        })),
+      } : {}),
       // Which of the listed options had actually been spoken aloud when the
       // user cut in. Authoritative: the model may not assume anything else.
       heard_option_indices: options.slice(0, 40)
@@ -483,7 +567,34 @@ globalThis.VFIntent = (() => {
     'ANSWER_FIELD', 'SELECT_OPTIONS', 'CORRECT_VALUE',
     'ACCEPT_CONFIRMATION', 'REJECT_CONFIRMATION',
     'REPEAT', 'SKIP', 'GO_BACK', 'NEXT', 'REQUEST_CLARIFICATION',
+    // Conversational navigation. These name a DIRECTION or a REFERENCE, never
+    // a field id, an index or a selector: which field that turns out to be is
+    // decided by resolveNav against the session's own history, so the model
+    // cannot reach a field the user has not met or a control that is not one.
+    'NAVIGATE_PREVIOUS', 'NAVIGATE_NEXT', 'NAVIGATE_RELATIVE',
+    'NAVIGATE_TO_FIELD', 'NAVIGATE_TO_REFERENCED_FIELD',
   ]);
+  const NAV_REFERENCES = new Set(['previous', 'before_previous', 'last_answered', 'before_field']);
+
+  /** A spoken field reference, as text and nothing else. */
+  function navReference(v) {
+    if (typeof v !== 'string') return null;
+    // Markup is not a way of saying a field name. Stripping it and keeping the
+    // rest would turn "<script>x</script>" into the plausible-looking "scriptx".
+    if (/[<>{}]/.test(v)) return null;
+    const t = v.trim().slice(0, 60);
+    return /[a-z0-9]/i.test(t) ? t : null;
+  }
+  /**
+   * A value the model believes rides along with the move ("go back to my name,
+   * it's Arnav"). Carried, never trusted: the session shape-checks it against
+   * the field it LANDS on and reads it back before it counts.
+   */
+  function navCorrection(v) {
+    if (typeof v !== 'string' || !v.trim()) return null;
+    const t = v.trim();
+    return t.length <= 200 && !/[<>{}]/.test(t) ? t : null;
+  }
   const COMMAND_FOR = { REPEAT: 'repeat', SKIP: 'skip', GO_BACK: 'previous', NEXT: 'next' };
 
   const reject = (why, detail) => ({ ok: false, why, detail: detail ?? null });
@@ -505,8 +616,15 @@ globalThis.VFIntent = (() => {
     // The turn the model was asked about must still be the turn in play.
     if (raw.turn_id != null && String(raw.turn_id) !== String(turnId)) return reject('stale-turn', raw.turn_id);
     // A model naming a different field is hallucinating one; there is exactly
-    // one active field and the core chose it.
-    if (raw.field_id != null && String(raw.field_id) !== String(field.id)) return reject('wrong-field', raw.field_id);
+    // one active field and the core chose it. Navigation is the exception and
+    // the ONLY one: naming another field is what a request to move IS. It is
+    // still not how the target is chosen - field_id is ignored outright, and
+    // the move resolves from field_reference against the session's own fields -
+    // so a model that echoes the wrong thing here cannot reach a field, it can
+    // only be ignored. (Measured: qwen3:8b puts the target's LABEL in field_id
+    // on NAVIGATE_TO_FIELD, and rejecting those threw away correct readings.)
+    const isNav = String(raw.intent || '').startsWith('NAVIGATE_');
+    if (!isNav && raw.field_id != null && String(raw.field_id) !== String(field.id)) return reject('wrong-field', raw.field_id);
 
     const meta = { via: 'intent', modelIntent: raw.intent, confidence: conf, needsClarification: !!raw.needs_clarification };
 
@@ -532,6 +650,42 @@ globalThis.VFIntent = (() => {
 
       case 'REPEAT': case 'SKIP': case 'GO_BACK': case 'NEXT':
         return { ok: true, decision: { action: 'command', command: COMMAND_FOR[raw.intent], ...meta } };
+
+      // --- navigation: a request to MOVE, resolved by the session ----------
+      //
+      // Nothing below chooses a field. Each case produces the same structured
+      // intent the deterministic parser produces, which resolveNav then
+      // resolves against the fields and the visit history the session holds -
+      // and refuses, rather than guesses, when it cannot.
+      case 'NAVIGATE_PREVIOUS':
+        return { ok: true, decision: { action: 'navigate', nav: { kind: 'relative', direction: 'backward', count: 1 }, ...meta } };
+
+      case 'NAVIGATE_NEXT':
+        return { ok: true, decision: { action: 'navigate', nav: { kind: 'relative', direction: 'forward', count: 1 }, ...meta } };
+
+      case 'NAVIGATE_RELATIVE': {
+        const dir = String(args.direction || '').toLowerCase();
+        if (dir !== 'backward' && dir !== 'forward') return reject('bad-direction', args.direction);
+        const n = args.count === null || args.count === undefined ? 1 : args.count;
+        if (!Number.isInteger(n) || n < 1 || n > 20) return reject('count-out-of-range', args.count);
+        return { ok: true, decision: { action: 'navigate', nav: { kind: 'relative', direction: dir, count: n }, ...meta } };
+      }
+
+      case 'NAVIGATE_TO_FIELD': {
+        const ref = navReference(args.field_reference);
+        if (!ref) return reject('no-field-reference', args.field_reference);
+        return { ok: true, decision: { action: 'navigate',
+          nav: { kind: 'field', field_reference: ref, correction: navCorrection(args.value) }, ...meta } };
+      }
+
+      case 'NAVIGATE_TO_REFERENCED_FIELD': {
+        const r = String(args.reference || '').toLowerCase();
+        if (!NAV_REFERENCES.has(r)) return reject('unknown-nav-reference', args.reference);
+        const ref = r === 'before_field' ? navReference(args.field_reference) : null;
+        if (r === 'before_field' && !ref) return reject('no-field-reference', args.field_reference);
+        return { ok: true, decision: { action: 'navigate',
+          nav: { kind: 'referenced', reference: r, field_reference: ref, correction: navCorrection(args.value) }, ...meta } };
+      }
 
       case 'SELECT_OPTIONS': {
         if (!options.length) return reject('select-on-non-choice');
@@ -916,6 +1070,6 @@ globalThis.VFIntent = (() => {
   }
 
   return { consult, resolveRelative, resolveExclusion, editByPosition, editRefusal, shouldConsult, buildContext,
-           validateIntent, valueShapeError, matchAllOptions, shapeValue,
-           INTENTS, DIGIT_INTENTS, RELATIVE, POSITIONAL, PARTIAL_EDIT, CORRECTION_MARKER };
+           validateIntent, valueShapeError, matchAllOptions, shapeValue, followValue,
+           INTENTS, DIGIT_INTENTS, RELATIVE, POSITIONAL, PARTIAL_EDIT, CORRECTION_MARKER, NAVIGATION };
 })();

@@ -121,3 +121,16 @@ test-memory:
 # Rime audio, real chrome.storage. Writes artifacts/memory_form.json.
 test-memory-form:
     node tools/test_memory_form.mjs
+
+# --- Conversational navigation -----------------------------------------------
+
+# The parser, the field matcher and the resolver, attacked in Node over a
+# simulated session. No browser, no network.
+test-navigation:
+    node tools/test_navigation.mjs
+
+# The same requests on a real form: real Chrome, real extension, real Rime
+# audio, a conditional field, an inserted field and a wizard step.
+# Writes artifacts/navigation_form.json.
+test-navigation-form:
+    node tools/test_navigation_form.mjs

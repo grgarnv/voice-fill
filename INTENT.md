@@ -15,9 +15,12 @@ STT                       whisper, or the Web Speech API
   ↓
 BARGE-IN                  Phase 3. Synchronous. Runs at VAD ONSET, before a
   ↓                       transcript exists at all.
+PERSONALISATION /         spelling assembly, casing, the personal profile and
+CONTEXT                   the heard ledger - all deterministic, all BEFORE the
+  ↓                       model, and most turns end here (VOICE_MEMORY.md)
 CONVERSATIONAL INTENT     this layer: interpretation only
   ↓
-STRICT INTENT SCHEMA      one of ten intents, machine-validatable
+STRICT INTENT SCHEMA      one of fifteen intents, machine-validatable
   ↓
 DETERMINISTIC VALIDATOR   checked against the core's own state
   ↓
@@ -35,7 +38,7 @@ never given anything to be wrong about except meaning.
 Concretely: the layer's entire output vocabulary is the set of decisions
 `resumePolicy` already produces, and which `processTranscript`'s switch already
 knows how to run — `answer`, `correction`, `accept`, `reject`, `command`,
-`clarify`, `drop`. There is no code path from a model response to a selector, a
+`clarify`, `drop`, `navigate`. There is no code path from a model response to a selector, a
 script, a click, or a state transition, because nothing downstream reads one.
 `tools/test_intent.mjs` asserts this by construction: every intent that can pass
 validation maps to an action in that fixed set.
@@ -132,7 +135,17 @@ bounded error path, so a user saying nothing useful is still moved along.
 | `ACCEPT_CONFIRMATION` | — | `accept` |
 | `REJECT_CONFIRMATION` | — | `reject` |
 | `REPEAT` / `SKIP` / `GO_BACK` / `NEXT` | — | `command` |
+| `NAVIGATE_PREVIOUS` / `NAVIGATE_NEXT` | — | `navigate` |
+| `NAVIGATE_RELATIVE` | `direction`, `count` | `navigate` |
+| `NAVIGATE_TO_FIELD` | `field_reference`, `value` | `navigate` |
+| `NAVIGATE_TO_REFERENCED_FIELD` | `reference`, `field_reference`, `value` | `navigate` |
 | `REQUEST_CLARIFICATION` | `question` | `clarify` |
+
+The navigation intents name a direction or a reference — never a field id, an
+index or a selector. Which field a reference turns out to mean is decided by
+`resolveNav` against the session's own fields and visit history, which is also
+why `field_id` is ignored rather than obeyed on those five. `NAVIGATION.md` has
+the whole of it.
 
 There is no `MODIFY_VALUE`. An edit-operation intent would need an edit DSL, and
 an edit DSL is a second thing to validate and get wrong. Instead a partial
@@ -173,7 +186,12 @@ with the provider down.
 }
 ```
 
-One optional key, `known_values`, is added when — and only when — this person
+Two optional keys. `form_fields` lists the form as the session holds it —
+`position`, `label`, `answered`, `current` — so a request to move can be
+matched to a field that exists instead of an invented one. It is **names only**:
+no ids, no selectors, and no values from any field but the active one.
+
+`known_values` is added when — and only when — this person
 has confirmed vocabulary for this kind of field. It is a hint; the value that
 comes back is validated exactly as any other, and an empty profile leaves the
 context byte-identical to the shape above.
@@ -195,8 +213,12 @@ with a forced confirmation, and that behaviour is unchanged.
 Deterministic, in the extension, against the core's own state — never against
 anything the model asserted about itself:
 
-- the intent is one of the ten
-- `field_id`, if present, is the active field
+- the intent is one of the vocabulary above, and nothing else
+- `field_id`, if present, is the active field — except on a navigation, where
+  naming another field is the request itself and the id is ignored outright
+- a navigation carries a direction in `{backward, forward}` and a count of
+  1–20, or a reference that is one of four words, or a field reference that is
+  text with no markup in it
 - `turn_id`, if present, is the current turn
 - option indices are integers inside the current list
 - positional picks are inside the heard set when the list was interrupted
@@ -250,7 +272,7 @@ detect without a model ("the fifth" of four; "all of them" on a single-select).
 | API key leakage | the key lives in `backend/intent.mjs` and never leaves the backend, exactly as the Rime key does. `/intent` is gated by `PROXY_TOKEN`. |
 | prompt injection via form content | field and option labels are untrusted text. The system prompt says so; more importantly the schema has no field that could carry an instruction, so a successful injection can at best cause a wrong option index — which is read back to the user before it counts. Tested with hostile labels in `tools/test_intent.mjs`. |
 | arbitrary model output | rejected by `output_config.format`, then rejected again by the validator. Malformed JSON, arrays, bare strings, unknown intents, and missing arguments are all covered by the corpus. |
-| DOM instructions | not representable. The output vocabulary is seven decision actions. |
+| DOM instructions | not representable. The output vocabulary is eight decision actions, and `tools/test_intent.mjs` asserts exhaustively that every one of them is a case in the session's own switch. |
 | stale intent execution | epoch, field, and pending-confirmation are re-checked after the round trip. |
 | a semantically inverted answer | a model reply that selects an option the user explicitly excluded is rejected deterministically. "Fever" is a *structurally valid* answer to "not the fever", so validation alone cannot catch it. |
 | request size | `/intent` caps the body at 256 KB; labels are truncated to 120 chars, the field label to 200, the transcript to 500. |

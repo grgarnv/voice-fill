@@ -543,15 +543,34 @@ G('routing - the layer stays out of the way');
 
 G('the model can never reach the DOM');
 {
+  // Exhaustive over the whole vocabulary, not a sample: every intent the schema
+  // allows, with arguments good enough to validate, and every ACTION any of
+  // them can produce has to be one the session already knows how to run.
+  const args = {
+    SELECT_OPTIONS: { option_indices: [1], by: 'position' },
+    ANSWER_FIELD: { value: 'Fever' }, CORRECT_VALUE: { value: 'Fever' },
+    REQUEST_CLARIFICATION: { question: 'Which one?' },
+    NAVIGATE_RELATIVE: { direction: 'backward', count: 2 },
+    NAVIGATE_TO_FIELD: { field_reference: 'phone number' },
+    NAVIGATE_TO_REFERENCED_FIELD: { reference: 'last_answered' },
+  };
+  const pending = { value: 'Fever', fieldId: fields.symptoms.id, intent: 'multichoice', spoken: 'Fever' };
   const surface = new Set();
-  for (const m of [sel([1]), val('Fever'), { intent: 'REPEAT', confidence: 1, needs_clarification: false },
-                   { intent: 'REQUEST_CLARIFICATION', arguments: { question: 'Which one?' }, confidence: 1, needs_clarification: true }]) {
+  const unvalidated = [];
+  for (const name of I.INTENTS) {
+    const m = { intent: name, arguments: args[name] || {}, confidence: 1, needs_clarification: name === 'REQUEST_CLARIFICATION' };
     const v = I.validateIntent(m, { field: fields.symptoms, intent: 'multichoice', options: SYMPTOMS,
-                                    heardOptionValues: SYMPTOMS.map(o => o.value), pending: null, turnId: 7 });
-    if (v.ok) surface.add(v.decision.action);
+                                    heardOptionValues: SYMPTOMS.map(o => o.value), pending, turnId: 7 });
+    if (v.ok) surface.add(v.decision.action); else unvalidated.push(`${name}:${v.why}`);
   }
-  const allowed = new Set(['answer', 'correction', 'accept', 'reject', 'command', 'clarify', 'drop']);
+  ok('every intent in the vocabulary validates with sound arguments', unvalidated.length === 0, unvalidated.join(' '));
+  const allowed = new Set(['answer', 'correction', 'accept', 'reject', 'command', 'clarify', 'drop', 'navigate']);
   ok('every producible action is one the core already executes', [...surface].every(a => allowed.has(a)), [...surface].join(','));
+  // And "the core executes it" is not a claim about a list kept by hand: each
+  // one has to be a case in the switch player.js actually runs.
+  const runs = new Set([...fs.readFileSync('extension/offscreen/player.js', 'utf8').matchAll(/case '([a-z-]+)':/g)].map(m => m[1]));
+  ok('...and each is a case in the session\'s own switch', [...surface].every(a => runs.has(a)),
+     [...surface].filter(a => !runs.has(a)).join(',') || 'all present');
   const src = fs.readFileSync('extension/shared/intent.js', 'utf8');
   ok('the layer contains no DOM access', !/document\.|querySelector|\.click\(|innerHTML|eval\(/.test(src));
   ok('the layer contains no chrome.* access', !/chrome\./.test(src));
