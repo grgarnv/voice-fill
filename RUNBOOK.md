@@ -7,12 +7,51 @@ half. Do them in order; each one gates the next.
 
 ## 0. Prerequisites
 
+This runbook supports a completely new macOS or Windows machine. Ollama is
+optional: VoiceFill's deterministic commands work without it, and the
+conversational intent layer can be explicitly disabled with
+`VF_INTENT_PROVIDER=none`.
+
+You need:
+
+- Node.js `20.6` or newer
+- Google Chrome `116` or newer
+- A Rime API key from https://app.rime.ai/tokens
+- Git, or an extracted copy of this repository
+- Whisper.cpp and the English model for reliable local speech-to-text
+
+### macOS
+
+Install Apple's command-line tools, then install Homebrew from
+https://brew.sh. In Terminal:
+
 ```bash
+xcode-select --install
+brew install node
 node --version     # need v20.6 or newer
 ```
 
-You also need a Rime API key from https://app.rime.ai/tokens and Google Chrome
-(version 116+, for the offscreen document API).
+Install Google Chrome from https://www.google.com/chrome/.
+
+### Windows
+
+Install Node.js LTS and Chrome. In PowerShell, Node.js can be installed with:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+winget install Google.Chrome
+```
+
+Restart PowerShell, then verify:
+
+```powershell
+node --version     # need v20.6 or newer
+npm --version
+```
+
+Install Git from https://git-scm.com/download/win, or extract the project ZIP
+instead. Windows does not have Homebrew, so do not run the macOS Whisper
+install command there; follow the Windows Whisper setup in Step 5.
 
 ---
 
@@ -42,14 +81,27 @@ ls          # expect: README.md PHASE0.md RUNBOOK.md package.json justfile
 cp .env.example .env
 ```
 
-Open `.env` and set **only** `RIME_API_KEY`. Leave `RIME_SPEAKER` empty — step 6
-fills it in for you.
+Open `.env` and set `RIME_API_KEY` and a private `PROXY_TOKEN`. The token can be
+any locally generated random string; it protects the proxy from becoming an
+open relay to Rime. Keep the other values from `.env.example` unless a later
+step tells you to change them.
 
 ```
 RIME_API_KEY=your_actual_token_here
+PROXY_TOKEN=replace_with_a_random_local_token
 ```
 
 No quotes, no `Bearer ` prefix, no trailing spaces. The token goes in raw.
+
+For a setup with no Ollama, also set:
+
+```
+VF_INTENT_PROVIDER=none
+```
+
+This keeps the deterministic form-filling path enabled while turning off the
+optional conversational model. To use the default local model instead, leave
+this unset and complete Step 11d.
 
 ---
 
@@ -94,13 +146,79 @@ https://app.rime.ai/tokens.
 
 ---
 
-## 5. Install dependencies
+## 5. Install dependencies and local speech-to-text
 
 ```bash
 npm install
 ```
 
-One dependency, `ws`. Takes a few seconds.
+This installs the Node dependencies. For reliable speech recognition, install
+Whisper as well.
+
+### macOS Whisper setup
+
+```bash
+npm run stt:install
+```
+
+This installs `whisper.cpp` with Homebrew and downloads
+`ggml-medium.en.bin` into `.cache/whisper`.
+
+### Windows Whisper setup
+
+`npm run stt:install` is macOS-only because it calls Homebrew. On Windows:
+
+1. Download a Windows build of `whisper-cli.exe` from the whisper.cpp releases.
+2. Download the `ggml-medium.en.bin` English model.
+3. Put both files somewhere such as:
+
+   ```text
+   C:\voicefill\whisper\whisper-cli.exe
+   C:\voicefill\whisper\ggml-medium.en.bin
+   ```
+
+4. Add these lines to `.env`:
+
+   ```
+   WHISPER_BIN=C:/voicefill/whisper/whisper-cli.exe
+   WHISPER_MODEL=C:/voicefill/whisper/ggml-medium.en.bin
+   ```
+
+Forward slashes are safest in `.env` paths. The backend does not require
+ffmpeg; it sends raw PCM directly to Whisper.
+
+If Whisper is omitted, Chrome's browser speech recognition remains available,
+but it is less reliable and `/provider` will report `browser-webspeech`.
+
+### Optional Ollama setup
+
+Ollama is not needed for basic operation. To enable natural conversational
+requests such as “go back to my email”:
+
+macOS:
+
+```bash
+brew install ollama
+ollama serve
+ollama pull qwen3:8b
+```
+
+Windows PowerShell:
+
+```powershell
+winget install Ollama.Ollama
+ollama pull qwen3:8b
+```
+
+Set this in `.env` on either platform:
+
+```
+VF_INTENT_PROVIDER=ollama
+VF_OLLAMA_MODEL=qwen3:8b
+```
+
+If Ollama is not installed, set `VF_INTENT_PROVIDER=none` instead of leaving
+the default provider pointing at an unavailable local service.
 
 ---
 
@@ -293,13 +411,10 @@ option-selection example needs.
 
 ### The local model (default, no key)
 
-```bash
-brew install ollama && ollama serve
-ollama pull qwen3:8b
-```
-
-Nothing else. `curl localhost:8787/health` should show `"intent":true`, and the
-backend log a line like `[intent] ollama qwen3:8b warm in 249ms`.
+Install Ollama using the macOS or Windows commands in Step 5, set
+`VF_INTENT_PROVIDER=ollama`, and restart the backend. `curl
+localhost:8787/health` should show `"intent":true`, and the backend log a line
+like `[intent] ollama qwen3:8b warm in 249ms`.
 
 ### The arithmetic path — works even with ollama stopped
 
@@ -452,7 +567,7 @@ All four, plus both ear checks, and Phase 0 is genuinely done.
 | `npm run catalog` | no | Print the voice catalog's structure |
 | `npm run selftest` | yes | Local checks only; proves nothing about Rime |
 | `npm run backend` | yes | Proxy on :8787, holds the API key |
-| `npm run stt:install` | no | whisper.cpp via Homebrew + medium.en model into `.cache/whisper` |
+| `npm run stt:install` | macOS only | whisper.cpp via Homebrew + medium.en model into `.cache/whisper`; Windows uses the manual setup in Step 5 |
 
 ---
 
