@@ -13,6 +13,14 @@
     <!-- Phase 3 core: dialog machine, playback clock, heard ledger, frame
          filter, in-order transcripts, resume table. Pure; unit-tested in Node. -->
     <script src="../shared/session-core.js"></script>
+    <!-- The conversational intent layer: router, context builder, validator.
+         Pure and Node-testable like session-core; the model itself lives behind
+         the backend proxy and can only reach the core through validateIntent. -->
+    <!-- Personal voice memory: spelling assembly, casing operations, and the
+         confirmed-correction profile. Pure, loaded BEFORE intent.js, which
+         uses it when present and works without it when not. -->
+    <script src="../shared/memory.js"></script>
+    <script src="../shared/intent.js"></script>
     <script src="../shared/stt.js"></script>
     <script type="module" src="player.js"></script>
   </body>

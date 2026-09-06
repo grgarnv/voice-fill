@@ -10,14 +10,28 @@ if (!process.env.WHISPER_MODEL) {
     if (fs.existsSync(c)) { process.env.WHISPER_MODEL = path.resolve(c); break; }
   }
 }
-const run = (args) => spawnSync('node', args, { stdio: 'inherit', env: process.env });
+const run = (args, extraEnv = {}) => spawnSync('node', args, { stdio: 'inherit', env: { ...process.env, ...extraEnv } });
+
+// The barge-in suites measure audio-stop latency, stale-frame rejection and the
+// heard ledger. They do not exercise the conversational layer at all - but each
+// spawns its own backend, and a backend pre-warms the local intent model and
+// holds it resident. Five suites' worth of that alongside Chrome and whisper
+// starved a 16 GB machine: Target.createTarget timed out, the fake audio device
+// stopped delivering bursts, and the offscreen document failed to come up.
+// Those are not Phase 3 failures, and loading a 5 GB model to not use it is not
+// a more faithful test. The conversational layer's own browser suite
+// (tools/test_intent_form.mjs) runs the shipped configuration with the provider
+// live; this is where it belongs.
+const NO_INTENT = { VF_INTENT_PROVIDER: 'none' };
 const RUNS = process.env.BARGEIN_RUNS || '20';
 
 const STEPS = [
   { id: 'selftest',  label: 'local self-test',                                      args: ['tools/selftest.mjs'] },
   { id: 'core',      label: 'barge-in core, attacked in Node (pure)',                args: ['tools/test_session_core.mjs'] },
-  { id: 'stub',      label: 'delayed frames / stale tail / late timestamps (plumbing)', args: ['tools/test_bargein_stub.mjs'] },
-  { id: 'bargein',   label: `${RUNS}+ real interruptions + scenarios (exit criterion)`, args: ['tools/test_bargein.mjs', '--runs', RUNS] },
+  { id: 'stub',      label: 'delayed frames / stale tail / late timestamps (plumbing)', args: ['tools/test_bargein_stub.mjs'], env: NO_INTENT },
+  { id: 'bargein',   label: `${RUNS}+ real interruptions + scenarios (exit criterion)`, args: ['tools/test_bargein.mjs', '--runs', RUNS], env: NO_INTENT },
+  // Phase 2's suite DOES touch the layer (corrections, choices, confirmations),
+  // so it runs against the shipped configuration.
   { id: 'voicefill', label: 'Phase 2 full form by voice (regression)',               args: ['tools/test_voicefill.mjs'] },
 ];
 
@@ -31,7 +45,7 @@ if (!DOC_ONLY) {
   for (let i = 0; i < STEPS.length; i++) {
     const s = STEPS[i];
     console.log(`\n─── ${i + 1}/${STEPS.length}  ${s.label} ───`);
-    const r = run(s.args);
+    const r = run(s.args, s.env);
     status[s.id] = r.status === 0 ? 'PASS' : (r.status === 2 ? 'BLOCKED' : 'FAIL');
     if (r.status !== 0 && s.id === 'selftest') { console.error('\nSelf-test failed; stopping.\n'); break; }
   }

@@ -109,3 +109,15 @@ test-bargein-stub:
 # Everything for Phase 3, in order, writing PHASE3_RESULTS.md
 phase3:
     node tools/phase3.mjs
+
+# --- Personal voice memory ---------------------------------------------------
+
+# Spelling assembly, casing operations, the learning gate and the profile,
+# attacked in Node. No browser, no network.
+test-memory:
+    node tools/test_memory.mjs
+
+# The thirteen demonstrations on a real form: real Chrome, real extension, real
+# Rime audio, real chrome.storage. Writes artifacts/memory_form.json.
+test-memory-form:
+    node tools/test_memory_form.mjs

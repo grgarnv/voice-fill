@@ -221,12 +221,37 @@ globalThis.VFNormalize = (() => {
   const setNamePhonemes = (m) => { NAME_PHONEMES = m || {}; };
   const getNamePhonemes = () => NAME_PHONEMES;
 
+  /**
+   * The USER's own dictionary, layered over the global one.
+   *
+   *   { "arnav": { phonemes: "ˈɑːrnəv" | null, respell: "ar nuv" | null } }
+   *
+   * Two representations because only one of them works everywhere. Phonemes
+   * need `phonemizeBetweenBrackets`, which Mist v1/v2 honour and Coda does not
+   * (README "Model"); a RESPELLING is ordinary text and works on any model, at
+   * the cost of being approximate. When phonemes are unavailable the respelling
+   * is used, and when neither exists the raw word is spoken - which is the
+   * correct behaviour, not an error.
+   */
+  let USER_PRONUNCIATIONS = {};
+  const setUserPronunciations = (m) => { USER_PRONUNCIATIONS = m || {}; };
+  const getUserPronunciations = () => USER_PRONUNCIATIONS;
+
+  // Braces are only a phoneme directive when the connection asked for them. On
+  // a model that ignores the flag they are read out as literal characters, so
+  // the same guard the pause tokens have applies here - see setPauseEnabled.
+  let phonemesEnabled = true;
+  const setPhonemesEnabled = (v) => { phonemesEnabled = !!v; };
+
   function speakName(s) {
     const t = String(s ?? '').trim();
     if (!t) return '';
     return t.split(/\s+/).map(word => {
+      const u = USER_PRONUNCIATIONS[word.toLowerCase()];
+      if (u?.phonemes && phonemesEnabled) return `{${u.phonemes}}`;
+      if (u?.respell) return u.respell;
       const p = NAME_PHONEMES[word.toLowerCase()];
-      return p ? `{${p}}` : word;
+      return p && phonemesEnabled ? `{${p}}` : word;
     }).join(' ');
   }
 
@@ -762,6 +787,7 @@ globalThis.VFNormalize = (() => {
     parseSpokenYear, parseEmail, matchOption, levenshtein, parseCommand,
     // config
     setPauseEnabled, setNamePhonemes, getNamePhonemes, isHighRisk,
+    setUserPronunciations, getUserPronunciations, setPhonemesEnabled,
     NATO, NATO_REVERSE, HIGH_RISK, COMMANDS,
   };
 })();

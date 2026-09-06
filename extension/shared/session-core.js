@@ -29,7 +29,12 @@ globalThis.VFSessionCore = (() => {
     IDLE:         ['IDLE', 'CONNECTING', 'READY'],
     CONNECTING:   ['READY', 'LISTENING', 'CONFIRMING', 'IDLE'],   // LISTENING/CONFIRMING: reconnect inside a live session
     READY:        ['READY', 'PROMPTING', 'CONNECTING', 'IDLE'],
-    PROMPTING:    ['PROMPTING', 'LISTENING', 'READY', 'IDLE'],
+    // CONFIRMING is reachable from PROMPTING because a CLARIFYING QUESTION is
+    // spoken as a prompt, and one can be asked while a read-back is still
+    // outstanding ("make that all caps" on a digit field). When that question
+    // ends, the pending confirmation is still there and the dialog is back in
+    // CONFIRMING - which is the truth about where it is, not a violation.
+    PROMPTING:    ['PROMPTING', 'LISTENING', 'CONFIRMING', 'READY', 'IDLE'],
     LISTENING:    ['LISTENING', 'TRANSCRIBING', 'PROMPTING', 'CONFIRMING', 'READY', 'IDLE'],
     TRANSCRIBING: ['TRANSCRIBING', 'FILLING', 'PROMPTING', 'CONFIRMING', 'LISTENING', 'READY', 'IDLE'],
     FILLING:      ['CONFIRMING', 'PROMPTING', 'LISTENING', 'READY', 'IDLE'],
@@ -296,7 +301,10 @@ globalThis.VFSessionCore = (() => {
   // the retraction is conversation, the rest is the value. Stripped before
   // anything else looks at the transcript, so a name field never receives
   // "Scratch That, It's Arnav".
-  const RETRACT = /^\s*(?:(?:no|nope|nah|wait|oh|sorry|um|uh)[,.!\s-]*)*(?:scratch that|strike that|forget that|cancel that|change that|correction|actually|i meant|i mean|no wait|wait no|let me (?:fix|correct|change) that|that'?s (?:wrong|not right)|not that)[,.!\s-]*(?:(?:it'?s|it is|its|actually|make it|make that|should be|i said|i meant|change it to|put|try|use|to)[,\s]+)?/i;
+  // Alternations are longest-first and \b-anchored throughout. With `no` listed
+  // before `nope`, "nope, scratch that" matched only the "no", left "pe, ..."
+  // behind, and the retraction was never recognised at all.
+  const RETRACT = /^\s*(?:(?:nope|no|nah|wait|oh|sorry|um|uh)\b[,.!\s-]*)*(?:scratch that|strike that|forget that|cancel that|change that|correction|actually|i meant|i mean|no wait|wait no|let me (?:fix|correct|change) that|that'?s (?:wrong|not right)|not that)[,.!\s-]*(?:(?:it'?s|it is|its|actually|make it|make that|should be|i said|i meant|change it to|put|try|use|to)\b[,\s]+)?/i;
   function stripRetraction(text) {
     const m = RETRACT.exec(text);
     if (!m || !m[0].trim()) return { retracted: false, rest: text };
@@ -337,7 +345,15 @@ globalThis.VFSessionCore = (() => {
       if (yn === true) return { action: 'accept' };
       if (yn === false) {
         // "no, it's 160072": the no AND the correction in one breath.
-        const rest = text.replace(/^\s*(no|nope|nah|wrong|incorrect|that's wrong|not right)[,.\s-]*(it's|it is|its|actually|make it|should be|i said|try)?\s*/i, '');
+        // Two bugs lived in one line here, both of which wrote junk into the
+        // field the read-back was about:
+        //   `no` before `nope` matched three letters of "nope" and left "pe",
+        //   which fromSpeech then took for the corrected value;
+        //   a single leading negation was stripped, so "No no, it's Arnav"
+        //   became the name "No, It'S Arnav".
+        // Longest-first, \b-anchored, and the negation may repeat.
+        const NEG_LEAD = /^\s*(?:(?:nope|no|nah|wrong|incorrect|that'?s wrong|not right)\b[,.!\s-]*)+(?:(?:it'?s|it is|its|actually|make it|make that|should be|i said|i meant|try|use)\b[,\s]*)?/i;
+        const rest = text.replace(NEG_LEAD, '');
         if (rest && rest !== text && field) {
           const ex = deps.fromSpeech(rest, field, pending.intent);
           if (ex.value !== null && ex.value !== undefined && String(ex.value) !== String(pending.value)) {

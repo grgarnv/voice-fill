@@ -1,0 +1,53 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Conversational intent fixture</title>
+<style>body{font:15px system-ui;max-width:640px;margin:24px auto}
+label{display:block;margin-top:14px;font-weight:600}
+input,select{font:inherit;padding:6px;width:100%;max-width:340px}
+fieldset{margin-top:14px}fieldset label{font-weight:400;margin-top:6px}</style>
+</head><body>
+<h1>Clinic intake</h1>
+<!--
+  Fixture for the conversational intent layer. The four fields are the PRD's own
+  examples, in the order the demonstrations need them:
+
+    symptoms   a four-way MULTI-select, first, so a session's opening prompt is
+               the option list "Fever, Cough, Headache, Nausea" and a barge-in
+               at a known offset cuts it after a known number of options
+    contact    a four-way SINGLE select, for "all of them" on a single-select
+               and for interrupted positional reference
+    first      free text, for "I heard Arjun. Correct?" / "No no, it's Arnav"
+    postcode   six digits, for "No, the last digit is two"
+-->
+<form id="f">
+  <fieldset>
+    <legend>Which symptoms apply?</legend>
+    <label><input type="checkbox" name="symptoms" value="fever"> Fever</label>
+    <label><input type="checkbox" name="symptoms" value="cough"> Cough</label>
+    <label><input type="checkbox" name="symptoms" value="headache"> Headache</label>
+    <label><input type="checkbox" name="symptoms" value="nausea"> Nausea</label>
+  </fieldset>
+
+  <label for="contact">Preferred contact method</label>
+  <select id="contact" name="contact">
+    <option value="">Please choose</option>
+    <option value="email">Email</option>
+    <option value="phone">Phone</option>
+    <option value="sms">SMS</option>
+    <option value="whatsapp">WhatsApp</option>
+  </select>
+
+  <label for="first">First name</label>
+  <input id="first" name="first" autocomplete="given-name">
+
+  <label for="postcode">Postal code</label>
+  <input id="postcode" name="postcode" inputmode="numeric">
+</form>
+<script>
+  window.__formState = () => {
+    const f = document.getElementById('f');
+    return {
+      symptoms: [...f.querySelectorAll('input[name=symptoms]:checked')].map(e => e.value),
+      contact: f.contact.value, first: f.first.value, postcode: f.postcode.value,
+    };
+  };
+</script>
+</body></html>

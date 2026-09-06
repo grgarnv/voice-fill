@@ -11,6 +11,7 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { connectRime } from './rime.mjs';
 import { transcribePcm, sttAvailable, sttConfig } from './stt.mjs';
+import { interpret, intentAvailable, intentConfig, intentReachable, intentPrewarm } from './intent.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 const TOKEN = process.env.PROXY_TOKEN || '';
@@ -24,6 +25,9 @@ const CFG = () => ({
   endpoint: process.env.RIME_WS_URL || 'wss://users-ws.rime.ai/ws3',
   transport: 'websocket-via-backend-proxy',
   stt: sttAvailable() ? 'backend-whisper' : 'browser-webspeech',
+  // The conversational intent layer. 'none' is a supported state: the extension
+  // falls back to its deterministic rules and stays usable.
+  intent: intentConfig(),
   // Connection-level, and only effective as query params - see backend/rime.mjs.
   segment: process.env.RIME_SEGMENT || 'never',
   // Pause tokens: Mist honours "<300>" as 300 ms when the query flag is set.
@@ -33,6 +37,11 @@ const CFG = () => ({
   // emits commas instead - Phase 2 measured grouping, not pause length, as
   // what carries the read-back.
   pauseBetweenBrackets: /^mist/.test(process.env.RIME_MODEL_ID || 'coda'),
+  // Inline pronunciation control, same story: a Mist v1/v2 feature (PHASE0
+  // probe 02). On Coda the flag is ignored and "{ˈɑːrnəv}" would be READ OUT,
+  // so it is reported here and the extension falls back to a plain-text
+  // respelling for any name in the user's pronunciation dictionary.
+  phonemizeBetweenBrackets: /^mist/.test(process.env.RIME_MODEL_ID || 'coda'),
   samplingRate: (process.env.RIME_AUDIO_FORMAT || 'pcm') === 'pcm' ? 24000 : null,
 });
 
@@ -47,7 +56,16 @@ const server = http.createServer((req, res) => {
   res.setHeader('Content-Type', 'application/json');
   // stt is reported here because a broken model is otherwise indistinguishable
   // from a deaf microphone: every turn just says "I didn't catch that".
-  if (url.pathname === '/health') return res.end(JSON.stringify({ ok: true, keyLoaded: !!process.env.RIME_API_KEY, stt: sttAvailable(), sttModel: sttConfig().model || null }));
+  // A configured-but-unreachable intent provider is the failure that otherwise
+  // looks like the layer simply not working, so /health answers reachability,
+  // not just configuration.
+  if (url.pathname === '/health') {
+    return intentReachable().then(ir => res.end(JSON.stringify({
+      ok: true, keyLoaded: !!process.env.RIME_API_KEY, stt: sttAvailable(),
+      sttModel: sttConfig().model || null, intent: intentAvailable() && ir,
+      intentConfigured: intentAvailable(), intentProvider: intentConfig().provider,
+    })));
+  }
   if (url.pathname === '/provider') return res.end(JSON.stringify(CFG()));
 
   // POST /stt - raw 16-bit PCM mono in the body, transcript out.
@@ -67,6 +85,29 @@ const server = http.createServer((req, res) => {
     });
     req.on('end', async () => {
       const r = await transcribePcm(Buffer.concat(chunks), { rate });
+      res.statusCode = r.ok ? 200 : 503;
+      res.end(JSON.stringify(r));
+    });
+    req.on('error', () => { res.statusCode = 400; res.end(JSON.stringify({ error: 'read failed' })); });
+    return;
+  }
+
+  // POST /intent - a context object in, one structured intent out. The model
+  // key stays here; the extension only ever sees the intent, and validates it
+  // against its own state before anything is executed.
+  if (url.pathname === '/intent') {
+    if (req.method !== 'POST') { res.statusCode = 405; return res.end(JSON.stringify({ error: 'POST only' })); }
+    if (TOKEN && req.headers['x-vf-token'] !== TOKEN && url.searchParams.get('token') !== TOKEN) {
+      res.statusCode = 401; return res.end(JSON.stringify({ error: 'unauthorized' }));
+    }
+    const chunks = [];
+    let size = 0;
+    req.on('data', (d) => { size += d.length; if (size > 256 * 1024) { req.destroy(); return; } chunks.push(d); });
+    req.on('end', async () => {
+      let ctx;
+      try { ctx = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { res.statusCode = 400; return res.end(JSON.stringify({ ok: false, error: 'bad json' })); }
+      const r = await interpret(ctx);
       res.statusCode = r.ok ? 200 : 503;
       res.end(JSON.stringify(r));
     });
@@ -99,6 +140,7 @@ wss.on('connection', (client, req) => {
     samplingRate: (q.get('audioFormat') || c.audioFormat) === 'pcm' ? 24000 : undefined,
     segment: q.get('segment') || c.segment,
     pauseBetweenBrackets: c.pauseBetweenBrackets,
+    phonemizeBetweenBrackets: c.phonemizeBetweenBrackets,
   });
 
   // Buffer client sends until upstream is open, so an early first utterance
@@ -116,4 +158,12 @@ wss.on('connection', (client, req) => {
   client.on('close', () => { try { upstream.close(); } catch {} });
 });
 
-server.listen(PORT, () => console.log(`VoiceFill proxy on :${PORT}  (key ${process.env.RIME_API_KEY ? 'loaded' : 'MISSING'})`));
+server.listen(PORT, async () => {
+  console.log(`VoiceFill proxy on :${PORT}  (key ${process.env.RIME_API_KEY ? 'loaded' : 'MISSING'})`);
+  const c = intentConfig();
+  if (c.provider === 'none') return console.log('[intent] disabled - deterministic rules only');
+  // Never awaited by anything: the proxy serves speech immediately, and the
+  // conversational layer falls back on its own until the model is resident.
+  const w = await intentPrewarm();
+  console.log(`[intent] ${c.provider} ${c.model || ''} ${w.ok ? `warm in ${w.ms}ms` : `NOT READY (${w.error || 'unreachable'})`}`.trim());
+});

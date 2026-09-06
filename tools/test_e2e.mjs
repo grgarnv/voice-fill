@@ -131,9 +131,14 @@ try {
       !!warm?.ok && warm.prewarmed === true, JSON.stringify(warm).slice(0, 160));
   await sleep(2500);
   const warmState = await send({ type: 'VF_STATE' });
-  rec('e2e: prewarm audio was discarded by contextId, never played',
-      (warmState?.droppedStaleChunks || 0) > 0 && (warmState?.playedChunks || 0) === 0,
-      `dropped=${warmState?.droppedStaleChunks} played=${warmState?.playedChunks} contexts=${JSON.stringify(warmState?.contextsSeen)}`);
+  // Prewarm audio must ARRIVE (that is what warms the socket) and must never be
+  // AUDIBLE. It used to be discarded by contextId, so this asserted a non-zero
+  // stale count; Phase 3 discards it by turn KIND instead - onFrame's
+  // `cur.kind === 'prewarm'` - which never touches that counter. What the test
+  // is actually about is unchanged: chunks came, nothing played.
+  rec('e2e: prewarm audio arrived and none of it was played',
+      (warmState?.rawChunkFrames || 0) > 0 && (warmState?.playedChunks || 0) === 0,
+      `raw=${warmState?.rawChunkFrames} played=${warmState?.playedChunks} dropped=${warmState?.droppedStaleChunks} contexts=${JSON.stringify(warmState?.contextsSeen)}`);
 
   const started = await send({ type: 'VF_SESSION_START', tabId: formTab.id });
   rec('e2e: session starts and the page is scanned through the content script',

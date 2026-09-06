@@ -27,9 +27,14 @@
     "test:core": "node tools/test_session_core.mjs",
     "test:bargein": "node tools/test_bargein.mjs",
     "test:bargein-stub": "node tools/test_bargein_stub.mjs",
-    "phase3": "node tools/phase3.mjs"
+    "phase3": "node tools/phase3.mjs",
+    "test:intent": "node tools/test_intent.mjs",
+    "test:intent-form": "node tools/test_intent_form.mjs",
+    "test:memory": "node tools/test_memory.mjs",
+    "test:memory-form": "node tools/test_memory_form.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "ws": "^8.18.0"
   }
 }

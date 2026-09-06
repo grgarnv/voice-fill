@@ -1,0 +1,59 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Personal voice memory fixture</title>
+<style>body{font:15px system-ui;max-width:640px;margin:24px auto}
+label{display:block;margin-top:14px;font-weight:600}
+input,select,textarea{font:inherit;padding:6px;width:100%;max-width:340px}
+fieldset{margin-top:14px}fieldset label{font-weight:400;margin-top:6px}</style>
+</head><body>
+<h1>Patient registration</h1>
+<!--
+  Fixture for personal voice memory + natural correction. The fields are in the
+  order the demonstrations need them:
+
+    symptoms   a four-way MULTI-select, first, so the opening prompt is an
+               option list and an option correction has something to correct
+    full       free text, for multi-component spelling and for casing:
+               "Arnav is A R N A V and Garg is G A R G", "all uppercase"
+    first      free text, for the headline case - STT hears "Enough", the user
+               spells A R N A V, confirms, and the correction is remembered
+    city       free text with a DIFFERENT intent, so a name learned for `first`
+               can be shown NOT to fire here
+    postcode   six digits, for "No, the last digit is two" and for a casing
+               instruction that must be refused rather than applied
+    notes      a comment box, where an ordinary sentence containing a learned
+               word must stay exactly what was said
+-->
+<form id="f">
+  <fieldset>
+    <legend>Which symptoms apply?</legend>
+    <label><input type="checkbox" name="symptoms" value="fever"> Fever</label>
+    <label><input type="checkbox" name="symptoms" value="cough"> Cough</label>
+    <label><input type="checkbox" name="symptoms" value="headache"> Headache</label>
+    <label><input type="checkbox" name="symptoms" value="nausea"> Nausea</label>
+  </fieldset>
+
+  <label for="full">Full name</label>
+  <input id="full" name="full" autocomplete="name">
+
+  <label for="first">First name</label>
+  <input id="first" name="first" autocomplete="given-name">
+
+  <label for="city">City</label>
+  <input id="city" name="city" autocomplete="address-level2">
+
+  <label for="postcode">Postal code</label>
+  <input id="postcode" name="postcode" inputmode="numeric">
+
+  <label for="notes">Notes for the doctor</label>
+  <textarea id="notes" name="notes" rows="2"></textarea>
+</form>
+<script>
+  window.__formState = () => {
+    const f = document.getElementById('f');
+    return {
+      symptoms: [...f.querySelectorAll('input[name=symptoms]:checked')].map(e => e.value),
+      full: f.full.value, first: f.first.value, city: f.city.value,
+      postcode: f.postcode.value, notes: f.notes.value,
+    };
+  };
+</script>
+</body></html>

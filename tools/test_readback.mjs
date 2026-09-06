@@ -47,6 +47,8 @@ const N = ctx.VFNormalize;
 // opens the socket, so the tokens become silence rather than words.
 const PAUSE_TOKENS = /^mist/.test(process.env.RIME_MODEL_ID || 'coda');   // the proxy's policy: Coda renders any <N> as ~0.9 s
 N.setPauseEnabled(PAUSE_TOKENS);
+/** A pause token, or nothing - the same guard VFPrompts and VFNormalize use. */
+const P = (ms) => (PAUSE_TOKENS ? `<${ms}> ` : '');
 
 /* ------------------------------------------------------------- corpus ----- */
 //
@@ -141,8 +143,12 @@ for (const item of CORPUS) {
   const row = { ...item, n: i };
   for (const arm of ['naive', 'tuned']) {
     const rendered = arm === 'naive' ? String(item.value) : N.toSpeech(item.value, item.intent);
-    // Identical to the template in extension/offscreen/player.js.
-    const text = `Let me read that back. <300> ${rendered}. <400> Is that correct?`;
+    // Identical to the template in extension/offscreen/player.js - INCLUDING
+    // its pause-token gate. Hardcoding "<300>" here while telling Rime not to
+    // interpret brackets (which is the Coda policy, line 95) had the tokens
+    // SPOKEN: "482913" came back as "93004829139" and "MN4XZ9" as "M400MN4XZ94",
+    // failing four of twenty items on a corpus that measures normalisation.
+    const text = `Let me read that back. ${P(300)}${rendered}. ${P(400)}Is that correct?`;
     let pcm;
     try { pcm = await synth(text); }
     catch (e) { row[arm] = { text, error: String(e.message), match: false }; continue; }

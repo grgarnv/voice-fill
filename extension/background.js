@@ -63,6 +63,20 @@ async function backendConfig() {
   };
 }
 
+/**
+ * The personal voice profile, same story as the backend address: the offscreen
+ * document cannot read chrome.storage, so it is loaded here and handed down.
+ *
+ * One key, one object, local to this browser profile. It is never sent to the
+ * backend, the model, or anywhere else - `/intent` receives at most a list of
+ * confirmed vocabulary strings for the current field, built in the extension.
+ */
+const PROFILE_KEY = 'voiceProfile';
+async function loadProfile() {
+  const d = await chrome.storage.local.get([PROFILE_KEY]);
+  return d[PROFILE_KEY] ?? null;
+}
+
 /** Frame 0 only. A broadcast answers from whichever frame replies first, which
  *  on an iframe-heavy page is effectively random. */
 const toContent = (tabId, m) => chrome.tabs.sendMessage(tabId, m, { frameId: 0 });
@@ -79,7 +93,8 @@ async function startSession(tabId, { speakSummary = true } = {}) {
   if (!scan?.ok) return { ok: false, error: 'content script did not respond - reload the page' };
   activeTabId = tabId;
   const started = await toOffscreen({
-    type: 'OFF_SESSION_START', fields: scan.fields, tabId, backend: await backendConfig(), speakSummary,
+    type: 'OFF_SESSION_START', fields: scan.fields, tabId, backend: await backendConfig(),
+    speakSummary, profile: await loadProfile(),
   });
   return { ...started, scanned: scan.fields.length, unlabelled: scan.unlabelled, url: scan.url };
 }
@@ -137,6 +152,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'VF_PREV':    sendResponse(await toOffscreen({ type: 'OFF_PREV' })); break;
         case 'VF_REPEAT':  sendResponse(await toOffscreen({ type: 'OFF_REPEAT' })); break;
         case 'VF_STATE':   sendResponse(await toOffscreen({ type: 'OFF_STATE' })); break;
+
+        // Personal voice memory. The offscreen document holds the live copy
+        // and asks for a write whenever a correction is confirmed; nothing
+        // here inspects or filters it, because what may be stored at all is
+        // decided by VFMemory.learn before it ever gets this far.
+        case 'VF_MEMORY_PUT':
+          await chrome.storage.local.set({ [PROFILE_KEY]: msg.profile ?? null });
+          sendResponse({ ok: true });
+          break;
+        case 'VF_MEMORY_GET':
+          sendResponse({ ok: true, profile: await loadProfile() });
+          break;
+        // Seed or replace the profile: storage AND the live session, so a
+        // change takes effect on the next utterance rather than the next start.
+        case 'VF_MEMORY_SET':
+          await chrome.storage.local.set({ [PROFILE_KEY]: msg.profile ?? null });
+          sendResponse(await toOffscreen({ type: 'OFF_PROFILE', profile: msg.profile ?? null }));
+          break;
+        case 'VF_MEMORY_CLEAR':
+          await chrome.storage.local.remove([PROFILE_KEY]);
+          sendResponse(await toOffscreen({ type: 'OFF_PROFILE', profile: null }));
+          break;
         case 'VF_SPEAK':   sendResponse(await toOffscreen({ type: 'OFF_SPEAK', text: msg.text })); break;
 
         case 'VF_STOP': {

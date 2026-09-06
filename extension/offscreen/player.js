@@ -23,6 +23,8 @@ const el = document.getElementById('player');
 const CORE = () => globalThis.VFSessionCore;
 const NORM = () => globalThis.VFNormalize;
 const STT = () => globalThis.VFStt;
+const INTENT = () => globalThis.VFIntent;
+const MEM = () => globalThis.VFMemory;
 const PROMPTS = () => globalThis.VFPrompts;
 
 /* ------------------------------------------------------------ audio ------- */
@@ -168,10 +170,25 @@ const S = {
   order: null,                // TranscriptOrder
   ptt: null,                  // { binding } for the open push-to-talk turn
   openBinding: null,          // binding for the open-mic segment in progress
+
+  // Personal voice memory. This document has no chrome.storage access, so the
+  // service worker loads the profile and hands it down with the message that
+  // needs it, exactly as it does the backend address.
+  profile: null,
+  // The confirmation gate. A correction is only ever remembered once the user
+  // has ACCEPTED the corrected value, and only when exactly one correction
+  // stood between what was heard and what was accepted.
+  learn: null,                // { fieldId, intent, observed, steps }
+
   metrics: {
     bargeIns: 0, bargeInsBySource: {}, stopSamples: [], staleAudioEvents: 0, staleAudioDetail: [],
     reasks: 0, reaskDetail: [], droppedTranscripts: [], lateTimestamps: 0, clearsSent: 0,
     doubleInterrupts: 0, disconnects: 0, reconnects: 0, preAudioInterrupts: 0,
+    // Conversational layer. Every number here is about INTERPRETATION; none of
+    // it touches the barge-in path, which runs before a transcript exists.
+    intent: { consulted: 0, byOrdinal: 0, byProvider: 0, byFormatting: 0, byMemory: 0, rejected: [],
+              clarifications: 0, providerMs: [], providerFailures: 0, staleDiscarded: 0,
+              skipped: {}, consultedWhy: {}, learned: [] },
   },
 };
 Object.defineProperty(S, 'state', { get() { return S.machine.state; } });
@@ -188,6 +205,7 @@ function init() {
   S.ledger = new C.Ledger(80);
   S.order = new C.TranscriptOrder();
   S.order.handler = processTranscript;
+  setProfile(null);
 }
 init();
 
@@ -342,7 +360,7 @@ function onFrame(raw) {
 
   if (m.type === 'proxy_ready') {
     S.provider = m.provider || null;
-    if (globalThis.VFPromptFlagSink) globalThis.VFPromptFlagSink(!!m.provider?.pauseBetweenBrackets);
+    if (globalThis.VFPromptFlagSink) globalThis.VFPromptFlagSink(!!m.provider?.pauseBetweenBrackets, !!m.provider?.phonemizeBetweenBrackets);
     return;
   }
   if (m.type === 'proxy_error') { S.lastError = m.error; return; }
@@ -491,6 +509,11 @@ function onPlaybackEnd(t) {
 function afterPlayback(t) {
   if (Q.length) return;                          // the next utterance sets state
   if (t.kind === 'prewarm') return;
+  // An utterance from the PREVIOUS session settling after stop, or between a
+  // restart assigning fields and its socket opening. Audio finishing cannot
+  // make a session that is not connected live, and letting it try produced a
+  // real IDLE -> LISTENING transition under a harness that restarts often.
+  if (S.state === 'IDLE' || S.state === 'CONNECTING') return;
   if (S.pending) { if (S.state !== 'CONFIRMING') go('CONFIRMING', `after ${t.kind}`); return; }
   if (currentField()) { if (S.state !== 'LISTENING') go('LISTENING', `after ${t.kind}`); return; }
   if (S.state !== 'READY') go('READY', `after ${t.kind}`);
@@ -875,6 +898,23 @@ function echoVerdict(binding, text) {
   if (!ref) return null;
   const overlap = CORE().echoRun(text, ref, { minWords: ECHO_MIN_WORDS });
   if (overlap < ECHO_MIN_OVERLAP) return null;
+  // The machine hearing itself REPRODUCES the value it just said. A person
+  // re-speaking a digit string to change one digit produces nearly the same
+  // words - "one six zero zero seven THREE" against a read-back of "one six
+  // zero zero seven two" is a contiguous run of five words out of six - and
+  // was being thrown away as echo. Measured: 2 of 5 double-interrupt trials in
+  // tools/test_bargein.mjs, and it is exactly the fight with the recogniser
+  // this layer exists to end.
+  //
+  // Same LENGTH, different digits is the discriminator, and it is safe in both
+  // directions: a verbatim echo matches the value, and an echo that whisper
+  // dropped a digit from is SHORTER, so both stay rejected.
+  const p = S.pending;
+  if (p && INTENT()?.DIGIT_INTENTS?.has(p.intent)) {
+    const said = NORM().wordsToDigits(text);
+    const val = String(p.value ?? '');
+    if (said && said.length === val.length && said !== val) return null;
+  }
   return { overlap: +overlap.toFixed(2), turnId: binding?.interrupted?.turnId ?? null };
 }
 
@@ -974,6 +1014,132 @@ async function setMicMode(mode, params) {
   }
 }
 
+/* --------------------------------------------- conversational intent ----- */
+//
+// Interpretation, never execution. This runs AFTER bargeIn has already stopped
+// the audio (at VAD onset, synchronously, with no transcript in existence yet),
+// so nothing here can be on the audio-stop path however slow it is.
+//
+//   resumePolicy  ->  shouldConsult  ->  [ordinals | provider]  ->  validate
+//                                                                      |
+//                             a decision in the SAME vocabulary the switch
+//                             below already executes, or the original one.
+
+function intentUrl() {
+  const url = new URL(backendCfg.backendUrl);
+  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+  url.pathname = '/intent';
+  return url.toString();
+}
+
+const INTENT_HTTP_TIMEOUT_MS = 4000;   // outer bound; the backend has its own
+
+async function askProvider(context) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), INTENT_HTTP_TIMEOUT_MS);
+  const t0 = performance.now();
+  try {
+    const r = await fetch(intentUrl(), {
+      method: 'POST', signal: ac.signal,
+      headers: { 'content-type': 'application/json', 'x-vf-token': backendCfg.proxyToken || '' },
+      body: JSON.stringify(context),
+    });
+    const j = await r.json().catch(() => null);
+    return { ...(j || { ok: false, error: `http ${r.status}` }), httpMs: +(performance.now() - t0).toFixed(0) };
+  } catch (e) {
+    return { ok: false, error: String(e?.name === 'AbortError' ? 'timeout' : (e?.message || e)), httpMs: +(performance.now() - t0).toFixed(0) };
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * A decision that arrived after the world moved on is not executed. The turn
+ * machinery already drops stale transcripts; this is the same rule applied to
+ * the interpretation of one, because the provider round trip is the window in
+ * which a second interruption can land.
+ */
+function stillCurrent(binding, field, pendingKey) {
+  if (S.epoch !== binding.epoch) return 'stale-epoch';
+  if ((currentField()?.id ?? null) !== (field?.id ?? null)) return 'field-moved';
+  const now = S.pending ? `${S.pending.fieldId}:${S.pending.value}` : null;
+  if (now !== pendingKey) return 'confirmation-moved';
+  return null;
+}
+
+/* ------------------------------------------------ personal voice memory --- */
+//
+// The profile is data, never authority. It can propose a value the recogniser
+// keeps getting wrong; the deterministic validator, the field's own shape and
+// the read-back all still stand between that proposal and the DOM.
+
+/** Load a profile (from storage, via the service worker) and wire it to Rime. */
+function setProfile(raw) {
+  const M = MEM();
+  if (!M) return null;
+  S.profile = M.sanitize(raw);
+  // Pronunciation: the user's dictionary layered over the global one. Whether
+  // the phoneme form or the respelling is used depends on the Rime model, and
+  // that is decided in VFPromptFlagSink from what the proxy reports.
+  try { NORM().setUserPronunciations(M.pronunciationMap(S.profile)); } catch {}
+  return S.profile;
+}
+
+/** chrome.storage lives in the service worker; this document only asks. */
+function saveProfile() {
+  try { chrome.runtime.sendMessage({ type: 'VF_MEMORY_PUT', profile: S.profile })?.catch?.(() => {}); } catch {}
+}
+
+/**
+ * The confirmation gate.
+ *
+ * A correction is remembered only when the user has said yes to the corrected
+ * value, and only when EXACTLY ONE correction stood between the transcript that
+ * was wrong and the value that was accepted. Two corrections in a row means the
+ * person was still deciding, and a profile entry built out of that fires
+ * silently on every later turn with no way for them to see it.
+ */
+function learnFromAccept(pending) {
+  const M = MEM(), L = S.learn;
+  S.learn = null;
+  if (!M || !L || !S.profile) return null;
+  if (L.fieldId !== pending.fieldId || L.steps !== 1) return null;
+  const r = M.learn(S.profile, { observed: L.observed, canonical: String(pending.value ?? ''), context: L.intent });
+  if (!r.learned) return null;
+  S.profile = r.profile;
+  S.metrics.intent.learned.push({ context: L.intent, at: Date.now() });
+  if (S.metrics.intent.learned.length > 20) S.metrics.intent.learned.shift();
+  try { NORM().setUserPronunciations(M.pronunciationMap(S.profile)); } catch {}
+  saveProfile();
+  return r.profile;
+}
+
+/** Wire the pure layer to this session: the ledger, the clock, and the proxy. */
+async function consultIntent(decision, ctx, binding) {
+  const I = INTENT(), C = CORE();
+  if (!I) return null;
+  const m = S.metrics.intent;
+  const pendingKey = binding.pendingKey ?? (ctx.pending ? `${ctx.pending.fieldId}:${ctx.pending.value}` : null);
+  return I.consult(decision, {
+    ...ctx,
+    field: { ...ctx.field, currentValue: ctx.pending?.value ?? S.filled[ctx.field.id] ?? null },
+    interrupted: !!binding.interrupted && !!ctx.heardText,
+    state: S.state, turnId: S.turnId, epoch: S.epoch, ledger: S.ledger.last(6),
+    profile: S.profile,
+  }, {
+    optionsHeard: C.optionsHeard,
+    stillCurrent: () => stillCurrent(binding, ctx.field, pendingKey),
+    askProvider: async (context) => {
+      const r = await askProvider(context);
+      if (r.ms != null) { m.providerMs.push(r.ms); if (m.providerMs.length > 60) m.providerMs.shift(); }
+      return r;
+    },
+    metric: (name, detail) => {
+      if (name === 'skipped' || name === 'consultedWhy') { m[name][detail] = (m[name][detail] || 0) + 1; return; }
+      if (name === 'rejected') { m.rejected.push({ why: detail, at: Date.now() }); if (m.rejected.length > 30) m.rejected.shift(); return; }
+      m[name] = (m[name] || 0) + 1;
+    },
+  });
+}
+
 /* ------------------------------------------------------------- the loop -- */
 
 /**
@@ -997,14 +1163,24 @@ async function processTranscript(binding, transcript) {
 
   const field = currentField();
   const intent = field ? intentOf(field) : null;
-  const decision = C.resumePolicy(
+  let decision = C.resumePolicy(
     { parseCommand: N.parseCommand, parseYesNo: N.parseYesNo, fromSpeech: N.fromSpeech, matchOption: N.matchOption },
     { transcript, binding, epoch: S.epoch, pending: S.pending, field, intent,
       options: field?.options || [], heardText: binding.interrupted?.heardText || '' });
 
-  const base = { transcript, captureId: binding.captureId, decision: decision.action, interrupted: binding.interrupted || null };
+  // The conversational layer gets a look before anything is executed. It may
+  // only ever return a decision from the vocabulary below - it cannot reach the
+  // DOM, the machine, or the audio path, all of which live past this switch.
+  const policyCtx = { transcript, binding, epoch: S.epoch, pending: S.pending, field, intent,
+                      options: field?.options || [], heardText: binding.interrupted?.heardText || '' };
+  let conversational = null;
+  try { conversational = await consultIntent(decision, policyCtx, binding); }
+  catch { S.metrics.intent.providerFailures++; }
+  if (conversational) decision = conversational;
+
+  const base = { transcript, captureId: binding.captureId, decision: decision.action, interrupted: binding.interrupted || null, via: decision.via || 'deterministic' };
   // What STT heard and what was done with it - the evidence a judge asks for.
-  (S.transcripts ||= []).push({ captureId: binding.captureId, source: binding.source, transcript, decision: decision.action, value: decision.ex?.value ?? null, interrupted: binding.interrupted?.kind ?? null, seconds: S.lastStt?.seconds ?? null, sttMs: S.lastStt?.ms ?? null, at: Date.now() });
+  (S.transcripts ||= []).push({ captureId: binding.captureId, source: binding.source, transcript, decision: decision.action, value: decision.ex?.value ?? null, via: decision.via || 'deterministic', interrupted: binding.interrupted?.kind ?? null, seconds: S.lastStt?.seconds ?? null, sttMs: S.lastStt?.ms ?? null, at: Date.now() });
   if (S.transcripts.length > 30) S.transcripts.shift();
 
   switch (decision.action) {
@@ -1020,12 +1196,15 @@ async function processTranscript(binding, transcript) {
       const p = S.pending;
       S.pending = null;
       S.attempts[p.fieldId] = 0;
+      // The one point at which a correction is known to have been RIGHT.
+      learnFromAccept(p);
       return { ...base, ...(await move(+1, 'accepted')), accepted: p.value };
     }
 
     case 'reject': {
       const p = S.pending;
       S.pending = null;
+      S.learn = null;
       await speak(`Let's try that again.`, { kind: 'info', fieldId: p.fieldId, why: 'reject', interrupt: true });
       await speakCurrent({ interrupt: false, why: 'reject' });
       return { ...base, ok: true, rejected: true, fieldId: p.fieldId };
@@ -1035,6 +1214,10 @@ async function processTranscript(binding, transcript) {
       const p = S.pending;
       const f = S.fields.find(x => x.id === p.fieldId) || field;
       S.pending = null;
+      // A second correction on the same field abandons the chain: what the
+      // recogniser first heard is no longer evidence about anything.
+      if (S.learn && S.learn.fieldId === p.fieldId) S.learn.steps++;
+      else S.learn = null;
       return { ...base, ...(await fillAndConfirm(f, p.intent, decision.ex, transcript)), corrected: true };
     }
 
@@ -1056,12 +1239,37 @@ async function processTranscript(binding, transcript) {
       return { ...base, ok: false, optionsRemaining: decision.remaining.map(o => o.text) };
     }
 
+    // The interpretation was genuinely ambiguous. Asking is the correct outcome
+    // and nothing is written - but it still COUNTS. A question that spends no
+    // attempt is a question with no end: a microphone producing gibberish had
+    // the field asking forever instead of being skipped, because clarify sat
+    // outside the error-recovery cap that failAttempt enforces.
+    case 'clarify': {
+      if (!field) { await speak(decision.question, { kind: 'info', why: 'clarify' }); return { ...base, ok: false, clarifying: true }; }
+      S.attempts[field.id] = (S.attempts[field.id] || 0) + 1;
+      if (S.attempts[field.id] >= MAX_ATTEMPTS) {
+        await speak(`I'm still not sure what you meant. ${pauseToken(300)}I'll skip this one - you can come back to it.`,
+                    { kind: 'error', fieldId: field.id, why: 'clarify-skip' });
+        return { ...base, ...(await move(+1, 'clarify-skip')), clarifying: false, skipped: true };
+      }
+      await speak(decision.question, { kind: 'prompt', fieldId: field.id, why: 'clarify', interrupt: true });
+      return { ...base, ok: false, clarifying: true, question: decision.question, attempts: S.attempts[field.id] };
+    }
+
     case 'unusable':
       if (!field) { await speak('There is no field selected. Say start to begin.', { kind: 'info', why: 'no-field' }); return { ...base, ok: false, error: 'no field' }; }
       return { ...base, ...(await failAttempt(field, decision.ex?.note || 'I could not use that', transcript)) };
 
     case 'answer':
       S.answered[field.id] = true;
+      // What the recogniser produced for this field, kept only until the turn
+      // resolves. If a single correction follows and is then accepted, this is
+      // the misrecognition worth remembering; anything else discards it.
+      // Only a value the RECOGNISER produced is evidence about the recogniser.
+      // An answer the profile, the ordinal resolver or the spelling assembler
+      // built is not a misrecognition worth remembering.
+      S.learn = ['memory', 'ordinal', 'spelling', 'casing', 'spelling+casing'].includes(decision.via) ? null
+        : { fieldId: field.id, intent, observed: transcript, steps: 0 };
       return { ...base, ...(await fillAndConfirm(field, intent, decision.ex, transcript)), viaHeard: !!decision.viaHeard };
 
     default:
@@ -1195,8 +1403,9 @@ async function speakCurrent({ withPosition = true, interrupt = true, why = 'nav'
   return { ...r, field: f, prompt: text };
 }
 
-async function sessionStart({ fields, tabId, backend, speakSummary = true }) {
+async function sessionStart({ fields, tabId, backend, speakSummary = true, profile }) {
   if (backend) backendCfg = { ...backendCfg, ...backend };
+  if (profile !== undefined) setProfile(profile);
   S.epoch += 1;
   S.fields = Array.isArray(fields) ? fields : [];
   S.tabId = tabId ?? S.tabId;
@@ -1205,6 +1414,7 @@ async function sessionStart({ fields, tabId, backend, speakSummary = true }) {
   // document so a harness can take deltas across a session restart.
   S.contextsSeen = {};
   S.pending = null; S.attempts = {}; S.filled = {}; S.answered = {}; S.lastTranscript = null; S.lastStt = null;
+  S.learn = null;
   S.reconnect.attempts = 0;
 
   const ok = await connect();
@@ -1253,7 +1463,7 @@ function stopSession() {
   if (t && ['sent', 'playing', 'done'].includes(t.status)) { t.status = 'cancelled'; t.stop = { reason: 'session stopped', source: 'system', playedSec: playedSecondsOf(t) }; ledgerEntry(t); settleEnd(t, 'stopped'); }
   try { if (S.micMode === 'ptt') STT().releaseMic(); } catch {}
   S.order.abandonAll('session-stop');
-  S.listening = false; S.ptt = null; S.openBinding = null; S.pending = null;
+  S.listening = false; S.ptt = null; S.openBinding = null; S.pending = null; S.learn = null;
   S.epoch += 1;
   S.index = -1; S.fields = [];
   if (S.reconnect.timer) { clearTimeout(S.reconnect.timer); S.reconnect.timer = null; }
@@ -1279,7 +1489,10 @@ function snapshot() {
     playedChunks: S.playedChunks, rawChunkFrames: S.rawChunkFrames, contextsSeen: S.contextsSeen,
     prewarmed: S.prewarmed, lastError: S.lastError, wsUrl: S.wsUrl,
     sttProvider: S.sttProvider, listening: S.listening, micMode: S.micMode, micLevel: STT().micLevel(),
-    pending: S.pending ? { display: S.pending.display, intent: S.pending.intent, fieldId: S.pending.fieldId, value: S.pending.value } : null,
+    // `spoken` is the exact string the read-back says. Exposed because the
+    // ledger only records an utterance once it FINISHES, so anything asserting
+    // on what was read back was racing the speech.
+    pending: S.pending ? { display: S.pending.display, intent: S.pending.intent, fieldId: S.pending.fieldId, value: S.pending.value, spoken: S.pending.spoken } : null,
     lastTranscript: S.lastTranscript, lastSttError: S.lastStt?.error ?? null, lastSttMs: S.lastStt?.ms ?? null, lastSttSeconds: S.lastStt?.seconds ?? null,
     attempts: S.attempts, filled: S.filled, filledCount: Object.keys(S.filled).length, answered: S.answered,
     queue: Q.length, capturesInFlight: S.order.pendingCount, capturesSwept: S.order.swept,
@@ -1287,6 +1500,11 @@ function snapshot() {
     ledger: S.ledger.last(14),
     metrics: { ...m, stopSamples: m.stopSamples.slice(-40), stopLatencyN: lat.length, stopLatencyP50: pct(0.5), stopLatencyP95: pct(0.95), stopLatencyMax: lat.length ? lat[lat.length - 1] : null },
     reconnect: { attempts: S.reconnect.attempts, lostAt: S.reconnect.lostAt, restoredAt: S.reconnect.restoredAt },
+    intent: { ...m.intent, providerMs: m.intent.providerMs.slice(-20) },
+    // The personal profile, in full. It is local to this machine and contains
+    // only vocabulary the user confirmed - no digits, no addresses, no field
+    // answers - so there is nothing here to redact and a great deal to debug.
+    memory: S.profile ? { ...S.profile, pendingLearn: S.learn ? { fieldId: S.learn.fieldId, steps: S.learn.steps } : null } : null,
     lastOnset: S.lastOnset || null, onsets: S.onsets || [], transcripts: (S.transcripts || []).slice(-12),
     turnAudioStartMs: t && t.clock.startedAt !== null ? perfToMs(ctxTimeToPerf(t.clock.startedAt)) : null,
     nowPerf: performance.now(), nowMs: Date.now(),
@@ -1336,6 +1554,12 @@ chrome.runtime.onMessage.addListener((msg, _s, respond) => {
         }
         case 'OFF_PREWARM':        respond(await prewarm()); break;
         case 'OFF_SESSION_START':  respond(await sessionStart(msg)); break;
+        // The service worker owns chrome.storage; the profile arrives and
+        // leaves through it. OFF_PROFILE also lets the harness seed one.
+        case 'OFF_PROFILE':
+          if (msg.profile !== undefined) setProfile(msg.profile);
+          respond({ ok: true, profile: S.profile });
+          break;
         case 'OFF_NEXT':           respond(await move(+1, 'next')); break;
         case 'OFF_PREV':           respond(await move(-1, 'previous')); break;
         case 'OFF_REPEAT':         respond(await speakCurrent({ why: 'repeat' })); break;
@@ -1377,11 +1601,16 @@ chrome.runtime.onMessage.addListener((msg, _s, respond) => {
 
 // The pause-token guard: prompts stop emitting <400> if the proxy did not set
 // the query param, so the tokens can never be read aloud as literal text.
-globalThis.VFPromptFlagSink = (enabled) => {
+globalThis.VFPromptFlagSink = (enabled, phonemes = false) => {
   if (globalThis.VFPrompts) globalThis.VFPrompts.setPauseEnabled(enabled);
   // The read-back's digit groups carry the same tokens; on Coda they must be
   // commas too, or every pair costs a fixed 0.9 s of silence.
-  if (globalThis.VFNormalize) globalThis.VFNormalize.setPauseEnabled(enabled);
+  if (globalThis.VFNormalize) {
+    globalThis.VFNormalize.setPauseEnabled(enabled);
+    // And the same guard for pronunciation braces: on a model that ignores
+    // phonemizeBetweenBrackets, "{ˈɑːrnəv}" is spoken as its characters.
+    globalThis.VFNormalize.setPhonemesEnabled(phonemes);
+  }
 };
 
 console.log('[VoiceFill] offscreen document loaded (Phase 3)');

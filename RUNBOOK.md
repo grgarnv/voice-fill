@@ -281,6 +281,155 @@ the demo, as the PRD's risk register anticipates.
 
 ---
 
+## 11d. Talk to it like a person (the conversational intent layer)
+
+This is the layer from [INTENT.md](./INTENT.md). Half of it works with no extra
+setup; the other half needs a model key.
+
+**`https://httpbin.org/forms/post` is the right page to try it on.** It is a
+real page on a real site, and its *Toppings* field is a four-way checkbox group
+— bacon, extra cheese, onion, mushroom — which is exactly the shape every
+option-selection example needs.
+
+### The local model (default, no key)
+
+```bash
+brew install ollama && ollama serve
+ollama pull qwen3:8b
+```
+
+Nothing else. `curl localhost:8787/health` should show `"intent":true`, and the
+backend log a line like `[intent] ollama qwen3:8b warm in 249ms`.
+
+### The arithmetic path — works even with ollama stopped
+
+No configuration, no network round trip, no model. Open the form,
+**Start**, and navigate to Toppings (say `next` until you hear it).
+
+| Say | Expect |
+|---|---|
+| `the first two` | Bacon + extra cheese, read back |
+| `the first and third` | Bacon + onion |
+| `all four` / `all of them` | every topping |
+| `the last two` | onion + mushroom |
+| `bacon and onion` | the same two, matched by name |
+| `everything except the bacon` | the other three. Before this layer, "not the bacon" *selected bacon* |
+| `all but the onion` | the other three |
+| `the fifth one` | **"I only have 4 options so far. Which one did you mean?"** — it asks, it does not clamp to the fourth |
+
+On *Size* (a three-way radio, single-select), say `all of them`: it should
+answer "This one takes a single answer. Which one would you like?" rather than
+picking one.
+
+### The model path — phrasings that need context rather than arithmetic
+
+These are the ones that actually reach ollama (or Anthropic, if you set
+`ANTHROPIC_API_KEY`). Expect roughly 2 s on an M-series Mac.
+
+| Say | Expect |
+|---|---|
+| `the other one` (after picking one) | the remaining one, if it is unambiguous |
+| `actually just the onion` | onion only, replacing the earlier pick |
+| `not that one` | a clarifying question, or the alternative if there is only one |
+| on a name read-back: `no no, it's Arnav` | corrected to Arnav |
+| on a phone read-back: `no, the last digit is two` | the **whole** number with its last digit changed (arithmetic — works with the model off) |
+
+---
+
+## 11e. Spell it, shout it, and be remembered
+
+This is the layer from [VOICE_MEMORY.md](./VOICE_MEMORY.md). All of it works
+with the model off — it is arithmetic — and the profile lives in
+`chrome.storage.local` on your own machine.
+
+`https://httpbin.org/forms/post` again: its *Customer name* field is the one to
+use.
+
+| Say, on the name field | Expect |
+|---|---|
+| `spell it A R N A V` | **Arnav** — not `A-R-N-A-V`, not `A R N A V` |
+| `My full name is Arnav Garg. Arnav is spelled A R N A V and Garg is G A R G.` | **Arnav Garg** — once, not twice |
+| `Arnav Garg, all uppercase` | **ARNAV GARG** |
+| `Arnav Garg, first name normal case, last name all caps` | **Arnav GARG** |
+| then, on the value already there: `make it all lowercase` | **arnav garg** |
+| `Arnav Garg. Arnav is A R N A V and Arnav is A R N O V` | it asks which spelling — it does not pick one |
+
+On the *Telephone* field, with a number read back:
+
+| Say | Expect |
+|---|---|
+| `no, the last digit is two` | the whole number, last digit changed |
+| `the last two digits should be 42` | the whole number, last two changed |
+| `change the third digit` | **"What should it be instead?"** |
+| `everything is right except the last digit` | the same question — and NOT "Got it" |
+| `the seventh letter is A` | **"There are only N letters in that…"** |
+| `make it all caps` | it asks rather than mangling a phone number |
+
+### Watching it learn
+
+The interesting one needs two turns and a confirmation.
+
+1. On the name field, say something the recogniser will get wrong — or just say
+   a word you will then correct, e.g. `Enough`.
+2. It reads back *Enough*. Say `No, it's Arnav. Spell it A R N A V.`
+3. It reads back *Arnav*. Say `yes`.
+4. **Now say `Enough` on a name field again.** It should offer *Arnav*
+   immediately, and still read it back before writing it.
+
+To see what was stored, open the extension's service-worker console and run:
+
+```js
+chrome.storage.local.get('voiceProfile').then(d => console.log(d.voiceProfile))
+```
+
+You should see one correction (`observed: "enough"`, `canonical: "Arnav"`,
+`context: "name"`) and one vocabulary entry. You should **not** see any phone
+number, postcode, email or free text you entered during the same session — those
+contexts cannot be learned at all. `chrome.storage.local.remove('voiceProfile')`
+clears it.
+
+Two things that should NOT happen, and are worth checking on purpose:
+
+- In a comment or notes field, say `How much is enough?` — it must stay exactly
+  that sentence. A learned name is matched against the whole utterance, not
+  against a substring.
+- In a *City* field, say `Enough` — it must not become Arnav. The association is
+  keyed to the kind of field it was learned on.
+| `the second digit should be a five` | likewise, and exactly: the local model gets this one wrong on its own |
+| on any read-back: `perfect` / `looks good` / `that's fine` | accepted — not written into the field as a value |
+
+The last row is the one worth checking deliberately. Without this layer,
+"Perfect." on a free-text read-back is taken as the new value and overwrites
+what you just approved.
+
+### Watching it work
+
+The popup's Diagnostics panel and `VF_STATE` carry an `intent` block:
+
+```
+consulted   how many turns the layer looked at
+byOrdinal   resolved by arithmetic, no model call
+byProvider  resolved by the model
+clarify     times it asked instead of guessing
+rejected    model answers the validator threw out, with the reason
+skipped     turns the deterministic core kept, by why
+providerMs  model latency samples
+```
+
+`byOrdinal` should be much larger than `byProvider` in ordinary use. If
+`providerFailures` climbs, the key or the backend is wrong — and VoiceFill
+keeps working, because a failed lookup falls back to the deterministic rules.
+
+### Kill the model mid-session
+
+Worth doing once. `pkill ollama` and carry on talking. Ordinals, exclusion,
+positional digit edits, labels, `yes`/`no`, and every command still work,
+because none of them were using it. Only the genuinely contextual phrasings
+degrade — and they degrade to a clarifying question, not to a wrong answer.
+That is the intended failure mode, not an outage.
+
+---
+
 ## 12. Verify the exit criteria
 
 | # | Criterion | How you confirmed it |

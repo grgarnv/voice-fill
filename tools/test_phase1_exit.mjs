@@ -112,10 +112,17 @@ try {
 
     // Walk the first N fields, recording what was said and whether audio came.
     for (let i = 0; i < form.read; i++) {
-      let st = null;
+      // The LEDGER, not S.turn. Two Phase 3 changes invalidated the original
+      // poll: a prompt now settles in LISTENING ("the user has the floor"),
+      // never READY, and S.turn is cleared the instant an utterance finishes -
+      // so `state === 'READY' && utterance.chunks > 0` can never both hold, and
+      // every field reported `undefined chunks`. The ledger is the durable
+      // record of what was actually spoken, which is what this test is about.
+      let st = null, e = null;
       for (let k = 0; k < 60; k++) {
         st = await send({ type: 'VF_STATE' });
-        if (st?.ok && st.state === 'READY' && st.utterance && st.utterance.chunks > 0) break;
+        e = (st?.ledger || []).filter(x => x.kind === 'prompt' && x.fieldId && x.fieldId === st?.field?.id).slice(-1)[0] || null;
+        if (st?.ok && e && e.chunks > 0 && ['played', 'done', 'interrupted'].includes(e.status)) break;
         await sleep(400);
       }
       if (st?.field && !seen.has(st.field.id)) {
@@ -123,8 +130,8 @@ try {
         spoken.push({
           index: st.index, label: st.field.label, type: st.field.type,
           labelSource: st.field.labelSource,
-          text: st.utterance?.text, chunks: st.utterance?.chunks,
-          audioSec: st.utterance?.scheduledSec,
+          text: e?.text, chunks: e?.chunks,
+          audioSec: e?.totalSec,
         });
       }
       if (i < form.read - 1) { await send({ type: 'VF_NEXT' }); await sleep(600); }
