@@ -42,7 +42,8 @@
     {
       "resources": [
         "assets/test.mp3",
-        "offscreen/recorder-worklet.js"
+        "offscreen/recorder-worklet.js",
+        "offscreen/monitor-worklet.js"
       ],
       "matches": [
         "<all_urls>"

@@ -23,7 +23,11 @@
     "test:readback": "node tools/test_readback.mjs",
     "test:voicefill": "node tools/test_voicefill.mjs",
     "phase2": "node tools/phase2.mjs",
-    "stt:install": "brew install whisper-cpp && mkdir -p .cache/whisper && curl -L -o .cache/whisper/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin"
+    "stt:install": "brew install whisper-cpp && mkdir -p .cache/whisper && curl -fL -C - -o .cache/whisper/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+    "test:core": "node tools/test_session_core.mjs",
+    "test:bargein": "node tools/test_bargein.mjs",
+    "test:bargein-stub": "node tools/test_bargein_stub.mjs",
+    "phase3": "node tools/phase3.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

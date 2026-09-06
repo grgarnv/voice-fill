@@ -146,13 +146,13 @@ try {
   let st = null;
   for (let i = 0; i < 75; i++) {
     st = await send({ type: 'VF_STATE' });
-    if (st?.ok && st.connected && turnCount(st) >= 2 && st.state === 'READY') break;
+    if (st?.ok && st.connected && turnCount(st) >= 2 && (st.state === 'READY' || st.state === 'LISTENING')) break;
     await sleep(400);
   }
 
   rec('e2e: WebSocket to the proxy is connected', !!st?.connected, st?.lastError || 'no error');
   rec('e2e: provider disclosure reaches the popup from the backend',
-      !!st?.provider && st.provider.active === 'rime' && st.provider.model === 'mistv2' && !!st.provider.speaker,
+      !!st?.provider && st.provider.active === 'rime' && st.provider.model === (process.env.RIME_MODEL_ID || 'coda') && !!st.provider.speaker,
       JSON.stringify(st?.provider));
   rec('e2e: disclosure matches what the proxy actually opened the socket with',
       st?.provider?.speaker === provider.speaker && st?.provider?.audioFormat === provider.audioFormat,

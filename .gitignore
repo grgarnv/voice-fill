@@ -4,3 +4,8 @@ artifacts/
 *.log
 eval/clips/
 .cache/
+.DS_Store
+graphify-out/
+.claude/settings.local.json
+CLAUDE.md
+AGENTS.md

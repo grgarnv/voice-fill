@@ -30,7 +30,7 @@ const ttfa = p04.pcm ? `cold ${p04.pcm.ttfaColdMs?.toFixed(0)}ms / warm ${p04.pc
 const doc = `# Phase 0 results
 
 Generated ${new Date().toISOString()} by \`npm run phase0\`.
-Speaker \`${process.env.RIME_SPEAKER || by('00')?.detail?.chosen || '?'}\`, model \`${process.env.RIME_MODEL_ID || 'mistv2'}\`, lang \`eng\`.
+Speaker \`${process.env.RIME_SPEAKER || by('00')?.detail?.chosen || '?'}\`, model \`${process.env.RIME_MODEL_ID || 'coda'}\`, lang \`eng\`.
 
 ## Probe results
 

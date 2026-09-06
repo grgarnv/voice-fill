@@ -45,7 +45,8 @@ vm.runInContext(fs.readFileSync('extension/shared/normalize.js', 'utf8'), ctx, {
 const N = ctx.VFNormalize;
 // The clips are rendered with pauseBetweenBrackets on, exactly as the proxy
 // opens the socket, so the tokens become silence rather than words.
-N.setPauseEnabled(true);
+const PAUSE_TOKENS = /^mist/.test(process.env.RIME_MODEL_ID || 'coda');   // the proxy's policy: Coda renders any <N> as ~0.9 s
+N.setPauseEnabled(PAUSE_TOKENS);
 
 /* ------------------------------------------------------------- corpus ----- */
 //
@@ -86,12 +87,12 @@ function synth(text) {
   return new Promise((resolve, reject) => {
     const u = new URL(process.env.RIME_WS_URL || 'wss://users-ws.rime.ai/ws3');
     u.searchParams.set('speaker', process.env.RIME_SPEAKER || 'abbie');
-    u.searchParams.set('modelId', process.env.RIME_MODEL_ID || 'mistv2');
+    u.searchParams.set('modelId', process.env.RIME_MODEL_ID || 'coda');
     u.searchParams.set('audioFormat', 'pcm');
     u.searchParams.set('lang', process.env.RIME_LANG || 'eng');
     u.searchParams.set('samplingRate', String(RATE));
     u.searchParams.set('segment', 'never');
-    u.searchParams.set('pauseBetweenBrackets', 'true');
+    if (PAUSE_TOKENS) u.searchParams.set('pauseBetweenBrackets', 'true');
     const ws = new WebSocket(u.toString(), {
       headers: { Authorization: `Bearer ${process.env.RIME_API_KEY}` }, handshakeTimeout: 15000,
     });

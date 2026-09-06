@@ -26,7 +26,9 @@ async function mistv3Speaker() {
 
 export default async function run(state) {
   const c = cfg();
-  const speaker = state.speaker || c.speaker;
+  // phonemizeBetweenBrackets is a Mist v1/v2 feature. Since the 2026-09-06 switch
+  // to coda this probe records what Mist can do, not what the product uses.
+  const speaker = process.env.RIME_MIST_SPEAKER || 'abbie';
   try {
     // The controlled comparison: identical text, flag toggled.
     const on = await ttsRest({

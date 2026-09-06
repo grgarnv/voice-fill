@@ -42,7 +42,7 @@ function synth(text, rate) {
   return new Promise((resolve, reject) => {
     const u = new URL(process.env.RIME_WS_URL);
     u.searchParams.set('speaker', process.env.RIME_SPEAKER);
-    u.searchParams.set('modelId', process.env.RIME_MODEL_ID || 'mistv2');
+    u.searchParams.set('modelId', process.env.RIME_MODEL_ID || 'coda');
     u.searchParams.set('audioFormat', 'pcm');
     u.searchParams.set('lang', 'eng');
     u.searchParams.set('samplingRate', String(rate));
@@ -171,7 +171,7 @@ async function say(text, waitMs = 2600) {
 async function waitReady(max = 40) {
   for (let i = 0; i < max; i++) {
     const s = await state();
-    if (s?.ok && (s.state === 'READY' || s.state === 'CONFIRMING')) return s;
+    if (s?.ok && (s.state === 'READY' || s.state === 'LISTENING' || s.state === 'CONFIRMING')) return s;
     await sleep(400);
   }
   return state();
@@ -341,7 +341,7 @@ try {
   const empty = await say('');
   s = await waitReady();
   rec('break: an empty transcript is handled and the session stays READY',
-      s.state === 'READY' || s.state === 'CONFIRMING', `state=${s.state} r=${JSON.stringify(empty).slice(0, 80)}`);
+      ['READY', 'LISTENING', 'CONFIRMING'].includes(s.state), `state=${s.state} r=${JSON.stringify(empty).slice(0, 80)}`);
 
   // Garbage on a digit field, twice: retry once, then skip rather than loop.
   s = await gotoField(/postal/i);

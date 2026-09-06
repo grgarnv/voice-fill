@@ -17,7 +17,7 @@ const TOKEN = process.env.PROXY_TOKEN || '';
 
 const CFG = () => ({
   active: 'rime',
-  model: process.env.RIME_MODEL_ID || 'mistv2',
+  model: process.env.RIME_MODEL_ID || 'coda',
   speaker: process.env.RIME_SPEAKER || null,
   lang: process.env.RIME_LANG || 'eng',
   audioFormat: process.env.RIME_AUDIO_FORMAT || 'pcm',
@@ -26,7 +26,13 @@ const CFG = () => ({
   stt: sttAvailable() ? 'backend-whisper' : 'browser-webspeech',
   // Connection-level, and only effective as query params - see backend/rime.mjs.
   segment: process.env.RIME_SEGMENT || 'never',
-  pauseBetweenBrackets: true,
+  // Pause tokens: Mist honours "<300>" as 300 ms when the query flag is set.
+  // Coda renders any "<N>" as a fixed ~0.9 s silence whatever N says (measured
+  // 2026-09-06: <100>, <300>, <600> all 0.90 s; <1500> 1.08 s), which stretched
+  // a read-back from 4 s to 7 s. Reported false for Coda, so the extension
+  // emits commas instead - Phase 2 measured grouping, not pause length, as
+  // what carries the read-back.
+  pauseBetweenBrackets: /^mist/.test(process.env.RIME_MODEL_ID || 'coda'),
   samplingRate: (process.env.RIME_AUDIO_FORMAT || 'pcm') === 'pcm' ? 24000 : null,
 });
 
@@ -39,7 +45,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
 
   res.setHeader('Content-Type', 'application/json');
-  if (url.pathname === '/health') return res.end(JSON.stringify({ ok: true, keyLoaded: !!process.env.RIME_API_KEY }));
+  // stt is reported here because a broken model is otherwise indistinguishable
+  // from a deaf microphone: every turn just says "I didn't catch that".
+  if (url.pathname === '/health') return res.end(JSON.stringify({ ok: true, keyLoaded: !!process.env.RIME_API_KEY, stt: sttAvailable(), sttModel: sttConfig().model || null }));
   if (url.pathname === '/provider') return res.end(JSON.stringify(CFG()));
 
   // POST /stt - raw 16-bit PCM mono in the body, transcript out.
@@ -90,7 +98,7 @@ wss.on('connection', (client, req) => {
     lang: c.lang,
     samplingRate: (q.get('audioFormat') || c.audioFormat) === 'pcm' ? 24000 : undefined,
     segment: q.get('segment') || c.segment,
-    pauseBetweenBrackets: true,
+    pauseBetweenBrackets: c.pauseBetweenBrackets,
   });
 
   // Buffer client sends until upstream is open, so an early first utterance
@@ -99,8 +107,10 @@ wss.on('connection', (client, req) => {
   let up = false;
   upstream.on('open', () => { up = true; pending.splice(0).forEach(m => upstream.send(m)); client.send(JSON.stringify({ type: 'proxy_ready', provider: c })); });
   upstream.on('message', (d) => { if (client.readyState === 1) client.send(d.toString()); });
-  upstream.on('close', (code) => { if (client.readyState === 1) client.close(1011, `upstream ${code}`); });
-  upstream.on('error', (e) => { if (client.readyState === 1) client.send(JSON.stringify({ type: 'proxy_error', error: String(e.message) })); });
+  // Logged, because a Rime-side close mid-session surfaces to the extension as
+  // nothing more than a reconnect; the code and reason are only visible here.
+  upstream.on('close', (code, reason) => { console.log(`[proxy] upstream closed ${code} ${String(reason || '')}`.trim()); if (client.readyState === 1) client.close(1011, `upstream ${code}`); });
+  upstream.on('error', (e) => { console.log(`[proxy] upstream error ${String(e.message)}`); if (client.readyState === 1) client.send(JSON.stringify({ type: 'proxy_error', error: String(e.message) })); });
 
   client.on('message', (d) => { const m = d.toString(); up ? upstream.send(m) : pending.push(m); });
   client.on('close', () => { try { upstream.close(); } catch {} });

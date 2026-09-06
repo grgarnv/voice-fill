@@ -1,0 +1,33 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Barge-in options fixture</title>
+<style>body{font:15px system-ui;max-width:640px;margin:24px auto}
+label{display:block;margin-top:14px;font-weight:600}
+input,select{font:inherit;padding:6px;width:100%;max-width:340px}</style>
+</head><body>
+<h1>Appointment</h1>
+<!--
+  Phase 3 fixture for option-list interruption. The FIRST field is a six-way
+  choice, so the very first prompt of a session is the list, and a burst of
+  speech at a chosen offset cuts it after a known number of options.
+-->
+<form id="f">
+  <label for="dept">Department</label>
+  <select id="dept" name="dept">
+    <option value="">Please choose</option>
+    <option value="card">Cardiology</option>
+    <option value="derm">Dermatology</option>
+    <option value="neur">Neurology</option>
+    <option value="orth">Orthopaedics</option>
+    <option value="paed">Paediatrics</option>
+    <option value="radi">Radiology</option>
+  </select>
+
+  <label for="postcode">Postal code</label>
+  <input id="postcode" name="postcode" inputmode="numeric">
+</form>
+<script>
+  window.__formState = () => {
+    const f = document.getElementById('f');
+    return { dept: f.dept.value, postcode: f.postcode.value };
+  };
+</script>
+</body></html>

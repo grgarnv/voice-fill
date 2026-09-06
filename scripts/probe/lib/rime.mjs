@@ -20,7 +20,7 @@ export function env(name, fallback = undefined) {
 export function cfg() {
   return {
     key: env('RIME_API_KEY'),
-    model: env('RIME_MODEL_ID', 'mistv2'),
+    model: env('RIME_MODEL_ID', 'coda'),
     speaker: process.env.RIME_SPEAKER || '',
     lang: env('RIME_LANG', 'eng'),
     restUrl: env('RIME_REST_URL', 'https://users.rime.ai/v1/rime-tts'),

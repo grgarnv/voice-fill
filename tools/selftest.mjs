@@ -189,7 +189,7 @@ t('Backend boots and serves /health + /provider', 'LOCAL', async () => {
   const h = await (await fetch('http://127.0.0.1:8787/health')).json();
   const p = await (await fetch('http://127.0.0.1:8787/provider')).json();
   if (!h.ok) throw new Error('health not ok');
-  if (p.active !== 'rime' || p.model !== 'mistv2') throw new Error(`bad provider payload ${JSON.stringify(p)}`);
+  if (p.active !== 'rime' || p.model !== (process.env.RIME_MODEL_ID || 'coda')) throw new Error(`bad provider payload ${JSON.stringify(p)}`);
   return `provider: ${p.active}/${p.model}/${p.audioFormat}`;
 });
 

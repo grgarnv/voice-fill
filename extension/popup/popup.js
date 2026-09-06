@@ -53,6 +53,39 @@ function paintSession(s) {
   if (s.field?.optionCount) bits.push(`${s.field.optionCount} options`);
   if (s.field?.labelSource) bits.push(`via ${s.field.labelSource}`);
   $('meta').textContent = bits.filter(Boolean).join(' · ');
+  paintLedger(s);
+}
+
+/* ------------------------------------------------ Phase 3: heard ledger ---- */
+//
+// The PRD's demo beat: interrupt the PIN prompt mid-word and SHOW that the
+// system knows exactly which words were audible. The last interrupted
+// utterance is displayed as Rime's words up to the cut, then "[interrupted]".
+
+function paintLedger(s) {
+  const last = [...(s.ledger || [])].reverse().find(e => e.status === 'interrupted');
+  $('ledger').textContent = last ? `heard: "${last.display}"` : '';
+  const m = s.metrics || {};
+  const bits = [];
+  if (m.bargeIns) bits.push(`${m.bargeIns} interruption${m.bargeIns === 1 ? '' : 's'}`);
+  if (m.stopLatencyP50 != null) bits.push(`stop p50 ${Math.round(m.stopLatencyP50)}ms`);
+  if (m.stopLatencyP95 != null) bits.push(`p95 ${Math.round(m.stopLatencyP95)}ms`);
+  if (m.reasks) bits.push(`RE-ASKS ${m.reasks}`);
+  if (m.staleAudioEvents) bits.push(`STALE AUDIO ${m.staleAudioEvents}`);
+  // Echo rejections are normal on speakers and pathological in headphones; either
+  // way the count is the difference between "working" and "hearing itself".
+  if (m.echoRejected) bits.push(`ECHO ${m.echoRejected}${m.echoGaveUp ? ` (${m.echoGaveUp} dropped)` : ''}`);
+  // A failing STT backend and a dead microphone both produce "I didn't catch
+  // that" and nothing else. Show which one it is: the error if the backend
+  // answered, otherwise the mic level the worklet is actually seeing.
+  if (s.lastSttError) bits.push(`STT: ${String(s.lastSttError).split('\n')[0].slice(0, 40)}`);
+  else if (s.micLevel?.at && s.micLevel.rms < 0.001) bits.push('MIC SILENT');
+  $('bargein').textContent = bits.join(' · ');
+  $('mic-ptt').classList.toggle('primary', s.micMode !== 'open');
+  $('mic-open').classList.toggle('primary', s.micMode === 'open');
+  $('ptt').hidden = s.micMode === 'open';
+  const ill = s.machine?.illegalCount || 0;
+  set('machine', ill ? 'bad' : 'ok', `${(s.state || 'idle').toLowerCase()}${ill ? ` · ${ill} illegal` : ''}`);
 }
 
 async function refreshState() {
@@ -63,6 +96,11 @@ async function refreshState() {
     const wsOk = s.connected;
     set('ws', wsOk ? 'ok' : (s.lastError ? 'bad' : 'wait'),
         wsOk ? `${s.state.toLowerCase()} · turn ${s.turnId}` : (s.lastError || 'not connected').slice(0, 26));
+    // Required failure disclosure: when Rime is unreachable mid-session the
+    // badge turns red and says so, rather than the popup looking normal.
+    const badge = document.querySelector('.badge');
+    if (badge) badge.style.borderColor = (!wsOk && s.total > 0) ? 'var(--bad)' : '';
+    if (badge) badge.title = (!wsOk && s.total > 0) ? 'Rime connection lost - reconnecting; text-only until it returns' : '';
   } else {
     paintSession(null);
   }
@@ -158,6 +196,12 @@ window.addEventListener('pointerup', pttUp);
 window.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat) pttDown(e); });
 window.addEventListener('keyup', (e) => { if (e.code === 'Space') pttUp(); });
 
+$('mic-ptt').addEventListener('click',  async () => { await send({ type: 'VF_SET_MIC_MODE', mode: 'ptt' });  await refreshState(); });
+$('mic-open').addEventListener('click', async () => {
+  const r = await send({ type: 'VF_SET_MIC_MODE', mode: 'open' });
+  if (r && !r.ok) { $('heard').textContent = `mic: ${String(r.error || 'failed').slice(0, 56)}`; if (/permission|notallowed|denied/i.test(r.error || '')) $('mic-row').hidden = false; }
+  await refreshState();
+});
 $('next').addEventListener('click',   async () => { await send({ type: 'VF_NEXT' });   await refreshState(); });
 $('prev').addEventListener('click',   async () => { await send({ type: 'VF_PREV' });   await refreshState(); });
 $('repeat').addEventListener('click', async () => { await send({ type: 'VF_REPEAT' }); await refreshState(); });
@@ -221,3 +265,27 @@ await refreshState();
 // The session lives in the offscreen document, so the popup is a view onto it,
 // not its owner: closing and reopening the popup must not disturb playback.
 setInterval(refreshState, 700);
+
+/* ponytail: debug capture for the static report. Remove with the worklet half.
+   Rec arms the output monitor; Dump saves exactly what was rendered to the
+   speaker as a WAV, so the noise can be looked at instead of described. */
+$('rec').addEventListener('click', async () => {
+  const r = await send({ type: 'VF_REC_START' });
+  $('ledger').textContent = r?.ok ? 'recording output...' : `rec failed: ${r?.error}`;
+});
+$('dump').addEventListener('click', async () => {
+  const r = await send({ type: 'VF_REC_DUMP' });
+  if (!r?.ok) { $('ledger').textContent = `dump failed: ${r?.error}`; return; }
+  const bin = atob(r.b64), u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  const h = new DataView(new ArrayBuffer(44));
+  const W = (o, str) => { for (let i = 0; i < str.length; i++) h.setUint8(o + i, str.charCodeAt(i)); };
+  W(0, 'RIFF'); h.setUint32(4, 36 + u8.length, true); W(8, 'WAVEfmt ');
+  h.setUint32(16, 16, true); h.setUint16(20, 1, true); h.setUint16(22, 1, true);
+  h.setUint32(24, r.rate, true); h.setUint32(28, r.rate * 2, true);
+  h.setUint16(32, 2, true); h.setUint16(34, 16, true); W(36, 'data'); h.setUint32(40, u8.length, true);
+  const url = URL.createObjectURL(new Blob([h.buffer, u8], { type: 'audio/wav' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = `voicefill-output-${Date.now()}.wav`; a.click();
+  $('ledger').textContent = `dumped ${(r.frames / r.rate).toFixed(2)}s @ ${r.rate}Hz`;
+});

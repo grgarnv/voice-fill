@@ -89,7 +89,7 @@ try {
     text:    document.querySelector('.badge').textContent.replace(/\\s+/g,' ').trim(),
   })`);
   rec('F1.5 popup discloses Rime as the active provider',
-      /Speaking via Rime/.test(badge.text) && badge.model === 'mistv2' && badge.speaker === providerHttp.speaker,
+      /Speaking via Rime/.test(badge.text) && badge.model === (process.env.RIME_MODEL_ID || 'coda') && badge.speaker === providerHttp.speaker,
       JSON.stringify(badge));
   rec('F1.5 disclosure carries the real transport details, not a hardcoded string',
       badge.fmt.startsWith(providerHttp.audioFormat) && badge.seg === 'segment=never', JSON.stringify(badge));

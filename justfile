@@ -67,7 +67,7 @@ phase1:
 stt-install:
     brew install whisper-cpp
     mkdir -p .cache/whisper
-    curl -L -o .cache/whisper/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin
+    curl -fL -C - -o .cache/whisper/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin
 
 # Normalisation + extraction, pure functions. No browser, no network.
 test-normalize:
@@ -88,3 +88,24 @@ test-voicefill:
 # Everything for Phase 2, in order, writing PHASE2_RESULTS.md
 phase2:
     node tools/phase2.mjs
+
+# --- Phase 3 -----------------------------------------------------------------
+
+# The barge-in core (state machine, clock, ledger, frame filter, resume table)
+# attacked in Node. No browser, no network.
+test-core:
+    node tools/test_session_core.mjs
+
+# The real thing: 20+ interruptions by speech at the microphone, real Rime,
+# real VAD, real stop, real ledger, real STT. Writes artifacts/phase3_bargein.json.
+test-bargein:
+    node tools/test_bargein.mjs
+
+# Delayed frames, stale tails after clear, late timestamps, slow delivery -
+# through the real extension against the loopback stub. PLUMBING, labelled so.
+test-bargein-stub:
+    node tools/test_bargein_stub.mjs
+
+# Everything for Phase 3, in order, writing PHASE3_RESULTS.md
+phase3:
+    node tools/phase3.mjs

@@ -115,8 +115,8 @@ Eight checks against real Rime. No mocks, no fallbacks.
 | | Check |
 |---|---|
 | 0A | Credential accepted — gates everything else |
-| 00 | Live catalog, locks a mistv2 English speaker + fallback |
-| 01 | REST synthesis on mistv2 |
+| 00 | Live catalog, locks an English speaker for `RIME_MODEL_ID` (coda) + fallback |
+| 01 | REST synthesis on the configured model |
 | 02 | `phonemizeBetweenBrackets` |
 | 03 | `pauseBetweenBrackets` + `phonemizeBetweenBrackets` together |
 | 04 | `/ws3` chunks and word timestamps, pcm and mp3 |
@@ -159,8 +159,8 @@ open artifacts/preflight/          # macOS
 Paste the values the preflight printed into `.env`:
 
 ```
-RIME_SPEAKER=abbie
-RIME_SPEAKER_FALLBACK=allison
+RIME_SPEAKER=astra
+RIME_SPEAKER_FALLBACK=luna
 ```
 
 The fallback matters: your risk register lists "speaker missing from mistv2 at
@@ -187,7 +187,7 @@ curl localhost:8787/health
 curl localhost:8787/provider
 ```
 
-`/provider` should report `rime` / `mistv2` / your speaker / `pcm`. That endpoint
+`/provider` should report `rime` / `coda` / your speaker / `pcm`. That endpoint
 feeds the popup's required active-provider badge.
 
 ---
@@ -249,6 +249,35 @@ person has to do them once per Chrome profile.
    you say yes or no.
 
 If holding to speak fails, the line under the button now says why (`mic: …`).
+
+---
+
+## 11c. Talk over it (Phase 3, by hand)
+
+Push-to-talk already barges in: press **Hold to speak** while Rime is talking
+and the audio stops on the press. The open microphone is what the PRD's hard
+problem is about, and it needs a working echo path, which the harness could
+not test (its fake device does not hear the speaker).
+
+1. Use headphones, or keep the speaker quiet enough that the microphone does
+   not hear Rime. Chrome's echo cancellation is on for the capture; whether it
+   is enough on your hardware is exactly what this step finds out.
+2. Click **Open mic (barge-in)**. The `Hold to speak` button hides; the mic is
+   live for the rest of the session.
+3. Press **Start**, and start answering before the question finishes. The audio
+   stops within a few tens of milliseconds; the line under the mic buttons
+   shows `heard: "Field 1 of 4. What's your—" [interrupted]` - the words that
+   were actually audible, from Rime's word timestamps and the playback clock.
+4. Let it read a PIN back and say **yes** before it finishes. It accepts.
+   Say **no, it's …** with a new number: the new number is read back instead.
+   Interrupt that read-back too: the last thing you said wins.
+5. The Diagnostics panel shows the running p50/p95 stop latency, and
+   `RE-ASKS` / `STALE AUDIO` counters that should stay at zero. The **State
+   machine** row shows the dialog state and any illegal transition.
+
+If Rime's voice fires the detector on your hardware (the audio stops itself
+mid-sentence with nobody speaking), click **Push-to-talk** and use the key for
+the demo, as the PRD's risk register anticipates.
 
 ---
 

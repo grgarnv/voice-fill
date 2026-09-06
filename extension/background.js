@@ -74,12 +74,12 @@ async function resolveTabId(explicit) {
 }
 
 /** Scan the page, then hand the field list to the offscreen session machine. */
-async function startSession(tabId) {
+async function startSession(tabId, { speakSummary = true } = {}) {
   const scan = await toContent(tabId, { type: 'VF_SCAN' });
   if (!scan?.ok) return { ok: false, error: 'content script did not respond - reload the page' };
   activeTabId = tabId;
   const started = await toOffscreen({
-    type: 'OFF_SESSION_START', fields: scan.fields, tabId, backend: await backendConfig(),
+    type: 'OFF_SESSION_START', fields: scan.fields, tabId, backend: await backendConfig(), speakSummary,
   });
   return { ...started, scanned: scan.fields.length, unlabelled: scan.unlabelled, url: scan.url };
 }
@@ -112,7 +112,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
 
         case 'VF_SESSION_START':
-          sendResponse(await startSession(await resolveTabId(msg.tabId)));
+          sendResponse(await startSession(await resolveTabId(msg.tabId), { speakSummary: msg.speakSummary !== false }));
           break;
 
         // Pre-warm on popup open (Phase 0 constraint 3): cold TTFA is 1475ms
@@ -124,7 +124,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'VF_LISTEN_START': sendResponse(await toOffscreen({ type: 'OFF_LISTEN_START' })); break;
         case 'VF_LISTEN_STOP':  sendResponse(await toOffscreen({ type: 'OFF_LISTEN_STOP' })); break;
         case 'VF_TRANSCRIPT':   sendResponse(await toOffscreen({ type: 'OFF_TRANSCRIPT', text: msg.text })); break;
+        case 'VF_REC_START': sendResponse(await toOffscreen({ type: 'OFF_REC_START' })); break;
+        case 'VF_REC_DUMP':  sendResponse(await toOffscreen({ type: 'OFF_REC_DUMP' })); break;
         case 'VF_SET_STT':      sendResponse(await toOffscreen({ type: 'OFF_SET_STT', provider: msg.provider })); break;
+        // Phase 3: microphone mode (push-to-talk / open), the heard ledger, and
+        // the harness's controlled barge-in trigger.
+        case 'VF_SET_MIC_MODE': sendResponse(await toOffscreen({ type: 'OFF_SET_MIC_MODE', mode: msg.mode, params: msg.params })); break;
+        case 'VF_LEDGER':       sendResponse(await toOffscreen({ type: 'OFF_LEDGER' })); break;
+        case 'VF_BARGEIN':      sendResponse(await toOffscreen({ type: 'OFF_BARGEIN' })); break;
 
         case 'VF_NEXT':    sendResponse(await toOffscreen({ type: 'OFF_NEXT' })); break;
         case 'VF_PREV':    sendResponse(await toOffscreen({ type: 'OFF_PREV' })); break;

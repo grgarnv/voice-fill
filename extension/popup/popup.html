@@ -47,13 +47,13 @@
 </head>
 <body>
   <h1>VoiceFill</h1>
-  <p class="sub">Phase 2 — fills the form by voice, push-to-talk</p>
+  <p class="sub">Phase 3 — talk over it; it stops, remembers what you heard, and never re-asks</p>
 
   <!-- Required active-provider disclosure (PRD F1.5). Populated from the
        backend's /provider payload, which is the same config used to open the
        Rime socket - never a hardcoded string that could drift from reality. -->
   <div class="badge">
-    Speaking via <strong>Rime</strong> · <code id="model">mistv2</code> · <code id="speaker">not set</code>
+    Speaking via <strong>Rime</strong> · <code id="model">coda</code> · <code id="speaker">not set</code>
     <div class="line2"><span id="fmt">pcm</span> · <span id="endpoint">/ws3</span> · <span id="seg">segment=never</span></div>
   </div>
 
@@ -100,6 +100,16 @@
   <button id="ptt" class="ptt" disabled>Hold to speak</button>
   <div class="heard" id="heard">&nbsp;</div>
 
+  <!-- Phase 3. Open microphone = barge-in by voice. Push-to-talk stays the
+       default the PRD asks for on camera: the mic is shut while Rime speaks,
+       so echo cannot fire the detector. -->
+  <div class="row" style="margin-bottom:4px">
+    <button id="mic-ptt" class="primary">Push-to-talk</button>
+    <button id="mic-open">Open mic (barge-in)</button>
+  </div>
+  <div class="heard" id="ledger" title="What was actually audible before you interrupted">&nbsp;</div>
+  <div class="heard" id="bargein">&nbsp;</div>
+
   <details>
     <summary>Diagnostics</summary>
     <div class="check"><span class="dot" id="d-content"></span><span class="name">Content script</span><span class="val" id="v-content">checking</span></div>
@@ -108,6 +118,8 @@
     <div class="check"><span class="dot" id="d-ws"></span><span class="name">Rime socket</span><span class="val" id="v-ws">not connected</span></div>
     <div class="check"><span class="dot" id="d-audio"></span><span class="name">Audio playback</span><span class="val" id="v-audio">not run</span></div>
     <div class="check"><span class="dot" id="d-csp"></span><span class="name">Page CSP</span><span class="val" id="v-csp">unknown</span></div>
+    <div class="check"><span class="dot" id="d-machine"></span><span class="name">State machine</span><span class="val" id="v-machine">idle</span></div>
+    <button id="rec">Rec</button><button id="dump">Dump WAV</button>
     <button id="play" style="width:100%;margin-top:10px">Play test tone on this page</button>
     <button id="token-edit" style="width:100%;margin-top:6px">Change proxy token</button>
   </details>

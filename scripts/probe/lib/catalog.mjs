@@ -78,15 +78,19 @@ export function parseCatalog(root) {
   });
 }
 
-export function selectMistV2English(voices) {
-  // Strict: explicitly mistv2 and explicitly English.
-  const strict = voices.filter(v => v.model === 'mistv2' && v.lang === 'eng');
+/** English voices for a model (default: the configured RIME_MODEL_ID, else coda). */
+export function selectModelEnglish(voices, model = process.env.RIME_MODEL_ID || 'coda') {
+  // Strict: explicitly this model and explicitly English.
+  const strict = voices.filter(v => v.model === model && v.lang === 'eng');
   if (strict.length) return { voices: strict, confidence: 'strict' };
   // Model known, language unlabelled (a catalog that only splits by model).
-  const modelOnly = voices.filter(v => v.model === 'mistv2' && v.lang === null);
+  const modelOnly = voices.filter(v => v.model === model && v.lang === null);
   if (modelOnly.length) return { voices: modelOnly, confidence: 'model-only (language not labelled in catalog)' };
   // English known, model unlabelled.
   const langOnly = voices.filter(v => v.lang === 'eng' && v.model === null);
   if (langOnly.length) return { voices: langOnly, confidence: 'lang-only (model not labelled - VERIFY with probe 01)' };
   return { voices: [], confidence: 'none' };
 }
+
+/** Kept for the self-test's shape regression, which was written against mistv2. */
+export const selectMistV2English = (voices) => selectModelEnglish(voices, 'mistv2');
